@@ -91,6 +91,13 @@ final class AppEnvironment {
         warmingCoordinator = WarmingCoordinator(
             client: client, cacheStore: cacheStore, thumbnailStore: thumbnailStore, monitor: networkMonitor
         )
+
+        // Backfill denormalized folder covers for libraries crawled before
+        // `CachedItem.coverTiles` existed (idempotent; a no-op once in sync).
+        Task { [cacheStore, account = credentials.account] in
+            try? await cacheStore.backfillFolderItemCovers(account: account)
+        }
+
         reconcileWarming()
     }
 }

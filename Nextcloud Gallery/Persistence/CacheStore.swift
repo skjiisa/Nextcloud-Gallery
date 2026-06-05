@@ -160,6 +160,25 @@ actor CacheStore {
         return try modelContext.fetch(descriptor).map(\.fullPath)
     }
 
+    /// Copies each folder's memoized cover tiles from its ``FolderState`` onto the
+    /// matching ``CachedItem`` directory row. Idempotent (writes only on a diff),
+    /// so it's safe to run at every launch; needed once after introducing the
+    /// denormalized ``CachedItem/coverTiles`` so already-crawled folders show their
+    /// covers without waiting to be re-crawled.
+    func backfillFolderItemCovers(account: String) throws {
+        let states = try modelContext.fetch(
+            FetchDescriptor<FolderState>(predicate: #Predicate { $0.account == account })
+        )
+        var changed = false
+        for state in states where !state.coverTiles.isEmpty {
+            guard let item = try cachedFolderItem(fullPath: state.folderPath, account: account),
+                  item.coverTiles != state.coverTiles else { continue }
+            item.coverTiles = state.coverTiles
+            changed = true
+        }
+        if changed { try modelContext.save() }
+    }
+
     // MARK: - 2x2 covers
 
     /// Recomputes the cover for a folder and walks up to the root, so a newly
@@ -169,7 +188,11 @@ actor CacheStore {
         var current = WebDAVPath.normalized(folderPath)
         var changed = false
         while true {
-            changed = try recomputeCover(folderPath: current, account: account) || changed
+            // If a level's cover is unchanged, every ancestor's input from this
+            // subtree is unchanged too, so the propagation can stop here. (A change
+            // only reaches an ancestor through this folder's representative tile.)
+            guard try recomputeCover(folderPath: current, account: account) else { break }
+            changed = true
             if current == root { break }
             guard let parent = parentPath(of: current, notAbove: root) else { break }
             current = parent
@@ -231,13 +254,21 @@ actor CacheStore {
         if state.coverTiles != picks || state.coverResolved != resolved {
             state.coverTiles = picks
             state.coverResolved = resolved
+            // Mirror onto the folder's cached row so the grid renders covers from
+            // its single child query (the root has a state but no item).
+            if let folderItem = try cachedFolderItem(fullPath: folderPath, account: account) {
+                folderItem.coverTiles = picks
+            }
             return true
         }
         return false
     }
 
     /// The single best tile to represent a folder: its memoized first cover tile,
-    /// else its first direct photo, else (recursively) a subfolder's.
+    /// else its first direct photo. Deliberately does NOT recurse into subfolders:
+    /// that descent re-fetched whole subtrees on every recompute and was the
+    /// dominant source of main-thread hangs. A subfolder-only folder's tile instead
+    /// arrives once a descendant is crawled and its cover propagates up the chain.
     private func representativeTile(folderPath: String, account: String) throws -> CoverTile? {
         if let first = try folderState(path: folderPath, account: account)?.coverTiles.first {
             return first
@@ -247,11 +278,6 @@ actor CacheStore {
             .filter({ !$0.isDirectory && $0.classFile == "image" && $0.hasPreview })
             .sorted(by: Self.stableOrder).first {
             return CoverTile(ocId: image.ocId, fileId: image.fileId, etag: image.etag)
-        }
-        for dir in kids.filter({ $0.isDirectory }).sorted(by: { $0.nameKey < $1.nameKey }) {
-            if let rep = try representativeTile(folderPath: dir.fullPath, account: account) {
-                return rep
-            }
         }
         return nil
     }
@@ -281,6 +307,17 @@ actor CacheStore {
         let descriptor = FetchDescriptor<FolderState>(
             predicate: #Predicate { $0.folderPath == path && $0.account == account }
         )
+        return try modelContext.fetch(descriptor).first
+    }
+
+    /// The cached directory row for a folder (keyed by its own `fullPath`). The
+    /// root folder has a ``FolderState`` but is no folder's child, so it has no
+    /// such row and this returns nil there.
+    private func cachedFolderItem(fullPath: String, account: String) throws -> CachedItem? {
+        var descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate { $0.fullPath == fullPath && $0.account == account && $0.isDirectory }
+        )
+        descriptor.fetchLimit = 1
         return try modelContext.fetch(descriptor).first
     }
 }

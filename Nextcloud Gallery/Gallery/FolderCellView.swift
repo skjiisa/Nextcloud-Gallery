@@ -8,21 +8,11 @@
 //
 
 import SwiftUI
-import SwiftData
 
 struct FolderCellView: View {
     let item: CachedItem
 
-    @Query private var states: [FolderState]
-
-    init(item: CachedItem) {
-        self.item = item
-        let path = item.fullPath
-        let account = item.account
-        _states = Query(filter: #Predicate<FolderState> { $0.folderPath == path && $0.account == account })
-    }
-
-    private var tiles: [CoverTile] { states.first?.coverTiles ?? [] }
+    private var tiles: [CoverTile] { item.coverTiles }
 
     var body: some View {
         Color.clear

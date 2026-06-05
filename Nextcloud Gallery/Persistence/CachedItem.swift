@@ -40,6 +40,10 @@ nonisolated final class CachedItem {
     var hasPreview: Bool
     var width: Int
     var height: Int
+    /// For directory items: up to 4 representative tiles for the 2x2 cover,
+    /// denormalized from ``FolderState`` so the grid renders covers straight from
+    /// its single child query, with no per-cell lookup. Always empty for photos.
+    var coverTiles: [CoverTile] = []
 
     init(
         ocId: String,
