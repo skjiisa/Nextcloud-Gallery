@@ -31,6 +31,9 @@ final class WarmingCoordinator {
     @ObservationIgnored private let monitor: NetworkMonitor
     @ObservationIgnored private let account: String
     @ObservationIgnored private var crawlTask: Task<Void, Never>?
+    @ObservationIgnored private var priorityTask: Task<Void, Never>?
+    /// Concurrent listings when front-running the visible folder's subfolders.
+    @ObservationIgnored private let priorityConcurrency = 4
 
     /// Number of concurrent folder-listing workers.
     @ObservationIgnored private let workerCount = 5
@@ -54,10 +57,63 @@ final class WarmingCoordinator {
 
     /// Pauses warming. Progress is preserved; `start()` resumes from the frontier.
     func pause() {
+        priorityTask?.cancel()
+        priorityTask = nil
         guard crawlTask != nil else { return }
         crawlTask?.cancel()
         crawlTask = nil
         state = .paused
+    }
+
+    /// Front-runs warming for the folders the user just navigated into view, so
+    /// their 2x2 covers fill in immediately instead of waiting for the depth-order
+    /// crawl to reach them. Pass them in display order (top first). Cancels any
+    /// previous prioritization (the current screen is what matters). Respects the
+    /// same Wi-Fi gate as the rest of warming.
+    func prioritize(folderPaths: [String]) {
+        priorityTask?.cancel()
+        guard monitor.isWiFi, !folderPaths.isEmpty else { return }
+        priorityTask = Task { await runPriority(folderPaths) }
+    }
+
+    private func runPriority(_ paths: [String]) async {
+        await withTaskGroup(of: Void.self) { group in
+            var index = 0
+            let initial = min(priorityConcurrency, paths.count)
+            while index < initial {
+                let path = paths[index]
+                group.addTask { await self.warmVisibleSubfolder(path) }
+                index += 1
+            }
+            while await group.next() != nil {
+                guard !Task.isCancelled, index < paths.count else { continue }
+                let path = paths[index]
+                group.addTask { await self.warmVisibleSubfolder(path) }
+                index += 1
+            }
+        }
+        // Note: don't nil `priorityTask` here — a newer prioritize() may have
+        // already replaced it, and we'd clobber the live task.
+    }
+
+    /// Lists a now-visible subfolder if it hasn't been crawled yet (jumping the
+    /// queue), then ensures its cover thumbnails are cached.
+    private func warmVisibleSubfolder(_ path: String) async {
+        guard !Task.isCancelled, monitor.isWiFi else { return }
+        if let folder = try? await cacheStore.claimSpecificPending(path: path, account: account) {
+            do {
+                let files = try await client.listFolder(at: folder.path, queue: networkQueue)
+                try Task.checkCancellation()
+                try await cacheStore.ingest(parentPath: folder.path, account: account, files: files)
+                try? await cacheStore.recomputeCoverChain(
+                    folderPath: folder.path, rootPath: client.filesRootPath, account: account
+                )
+            } catch {
+                try? await cacheStore.markPending(path: folder.path, account: account)
+                return
+            }
+        }
+        await prefetchCoverTiles(for: path)
     }
 
     private func runCrawl() async {

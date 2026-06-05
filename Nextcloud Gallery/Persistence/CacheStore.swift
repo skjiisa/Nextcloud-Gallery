@@ -111,6 +111,17 @@ actor CacheStore {
         return FolderDTO(path: folder.folderPath, depth: folder.depth, etag: folder.etag)
     }
 
+    /// Atomically claims one specific folder for crawling, but only if it's still
+    /// pending. Returns nil if it's already listed or in flight — so this safely
+    /// front-runs the breadth-first crawl without ever double-listing a folder.
+    func claimSpecificPending(path: String, account: String) throws -> FolderDTO? {
+        guard let folder = try folderState(path: WebDAVPath.normalized(path), account: account),
+              folder.listState == .pending else { return nil }
+        folder.listState = .claimed
+        try modelContext.save()
+        return FolderDTO(path: folder.folderPath, depth: folder.depth, etag: folder.etag)
+    }
+
     /// Returns a claimed/failed folder to the pending frontier.
     func markPending(path: String, account: String) throws {
         guard let folder = try folderState(path: WebDAVPath.normalized(path), account: account) else { return }
@@ -136,6 +147,17 @@ actor CacheStore {
     /// The current cover tiles for a folder (for proactive thumbnail prefetch).
     func coverTiles(folderPath: String, account: String) throws -> [CoverTile] {
         try folderState(path: WebDAVPath.normalized(folderPath), account: account)?.coverTiles ?? []
+    }
+
+    /// Full paths of a folder's immediate subfolders, in display (name) order.
+    /// Used to prioritize warming the subfolders the user just navigated into view.
+    func childFolderPaths(parentPath: String, account: String) throws -> [String] {
+        let parent = WebDAVPath.normalized(parentPath)
+        let descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate { $0.parentPath == parent && $0.account == account && $0.isDirectory },
+            sortBy: [SortDescriptor(\.nameKey)]
+        )
+        return try modelContext.fetch(descriptor).map(\.fullPath)
     }
 
     // MARK: - 2x2 covers
