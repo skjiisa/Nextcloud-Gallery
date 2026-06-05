@@ -1,0 +1,42 @@
+{
+  "originHash" : "6314f9a67ec6610ea493fb95198242dcd059d00d1896e0aad529ba541a711a18",
+  "pins" : [
+    {
+      "identity" : "alamofire",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Alamofire/Alamofire",
+      "state" : {
+        "revision" : "7595cbcf59809f9977c5f6378500de2ad73b7ddb",
+        "version" : "5.12.0"
+      }
+    },
+    {
+      "identity" : "nextcloudkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/nextcloud/NextcloudKit.git",
+      "state" : {
+        "revision" : "ef7b20a5dab6061d4139f943e824981369ef949e",
+        "version" : "7.3.3"
+      }
+    },
+    {
+      "identity" : "swiftyjson",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SwiftyJSON/SwiftyJSON",
+      "state" : {
+        "revision" : "af76cf3ef710b6ca5f8c05f3a31307d44a3c5828",
+        "version" : "5.0.2"
+      }
+    },
+    {
+      "identity" : "swiftyxmlparser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/yahoojapan/SwiftyXMLParser",
+      "state" : {
+        "revision" : "d7a1d23f04c86c1cd2e8f19247dd15d74e0ea8be",
+        "version" : "5.6.0"
+      }
+    }
+  ],
+  "version" : 3
+}
