@@ -251,17 +251,22 @@ actor CacheStore {
         }
 
         let resolved = picks.count == 4 || state.listState == .listed
-        if state.coverTiles != picks || state.coverResolved != resolved {
-            state.coverTiles = picks
-            state.coverResolved = resolved
-            // Mirror onto the folder's cached row so the grid renders covers from
-            // its single child query (the root has a state but no item).
-            if let folderItem = try cachedFolderItem(fullPath: folderPath, account: account) {
-                folderItem.coverTiles = picks
-            }
-            return true
+        let tilesChanged = state.coverTiles != picks
+        let resolvedChanged = state.coverResolved != resolved
+        guard tilesChanged || resolvedChanged else { return false }
+
+        if tilesChanged { state.coverTiles = picks }
+        if resolvedChanged { state.coverResolved = resolved }
+        // Mirror onto the folder's cached row only when the tiles actually moved —
+        // that row is observed by the visible grid's `@Query`, so an unchanged
+        // write here invalidates every cell on screen. (The root has a state but
+        // no item, hence the optional lookup.)
+        if tilesChanged,
+           let folderItem = try cachedFolderItem(fullPath: folderPath, account: account),
+           folderItem.coverTiles != picks {
+            folderItem.coverTiles = picks
         }
-        return false
+        return true
     }
 
     /// The single best tile to represent a folder: its memoized first cover tile,

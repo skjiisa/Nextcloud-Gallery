@@ -108,22 +108,30 @@ extension CachedItem {
     }
 
     /// Updates the mutable fields of an existing cached item from a fresh listing.
+    /// Every assignment guards against a no-op write because each one is observed
+    /// by `@Query`, and routine re-listings rarely change anything.
     func apply(file: NKFile, parentPath: String, fullPath: String, account: String) {
-        self.account = account
-        self.parentPath = parentPath
-        self.fileName = file.fileName
-        self.nameKey = file.fileName.lowercased()
-        self.fullPath = fullPath
-        self.isDirectory = file.directory
-        self.kindRank = file.directory ? 0 : 1
-        self.fileId = file.fileId
-        self.etag = file.etag
-        self.contentType = file.contentType
-        self.classFile = file.classFile
-        self.size = file.size
-        self.date = file.date
-        self.hasPreview = file.hasPreview
-        self.width = Int(file.width)
-        self.height = Int(file.height)
+        if self.account != account { self.account = account }
+        if self.parentPath != parentPath { self.parentPath = parentPath }
+        if self.fileName != file.fileName {
+            self.fileName = file.fileName
+            self.nameKey = file.fileName.lowercased()
+        }
+        if self.fullPath != fullPath { self.fullPath = fullPath }
+        if self.isDirectory != file.directory {
+            self.isDirectory = file.directory
+            self.kindRank = file.directory ? 0 : 1
+        }
+        if self.fileId != file.fileId { self.fileId = file.fileId }
+        if self.etag != file.etag { self.etag = file.etag }
+        if self.contentType != file.contentType { self.contentType = file.contentType }
+        if self.classFile != file.classFile { self.classFile = file.classFile }
+        if self.size != file.size { self.size = file.size }
+        if self.date != file.date { self.date = file.date }
+        if self.hasPreview != file.hasPreview { self.hasPreview = file.hasPreview }
+        let newWidth = Int(file.width)
+        if self.width != newWidth { self.width = newWidth }
+        let newHeight = Int(file.height)
+        if self.height != newHeight { self.height = newHeight }
     }
 }
