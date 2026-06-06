@@ -96,27 +96,47 @@ actor CacheStore {
         try modelContext.save()
     }
 
-    /// Atomically claims the shallowest pending folder for crawling. Serialized by
-    /// the actor, so two workers can never claim the same folder.
-    func claimNextPending(account: String) throws -> FolderDTO? {
+    /// Atomically claims the next folder to crawl, biasing toward `root` — the
+    /// folder the user is currently viewing. The shallowest pending folder *under*
+    /// `root` (breadth-first within that subtree) is claimed first; only once that
+    /// subtree is fully listed does it fall back to the globally shallowest pending
+    /// folder. Pass `nil` for an unbiased global breadth-first claim.
+    ///
+    /// Serialized by the actor, so two workers can never claim the same folder.
+    func claimNextPending(under root: String?, account: String) throws -> FolderDTO? {
         let pendingRaw = ListState.pending.rawValue
+
+        // First choice: the shallowest pending folder within the prioritized
+        // subtree (the folder itself, or anything beneath its `path + "/"`).
+        if let root {
+            let base = WebDAVPath.normalized(root)
+            let prefix = base + "/"
+            var descriptor = FetchDescriptor<FolderState>(
+                predicate: #Predicate {
+                    $0.account == account && $0.listStateRaw == pendingRaw
+                        && ($0.folderPath == base || $0.folderPath.starts(with: prefix))
+                },
+                sortBy: [SortDescriptor(\.depth), SortDescriptor(\.folderPath)]
+            )
+            descriptor.fetchLimit = 1
+            if let folder = try modelContext.fetch(descriptor).first {
+                return try claim(folder)
+            }
+        }
+
+        // Fallback: the globally shallowest pending folder (keeps the rest of the
+        // tree warming once the prioritized subtree is exhausted).
         var descriptor = FetchDescriptor<FolderState>(
             predicate: #Predicate { $0.account == account && $0.listStateRaw == pendingRaw },
             sortBy: [SortDescriptor(\.depth), SortDescriptor(\.folderPath)]
         )
         descriptor.fetchLimit = 1
         guard let folder = try modelContext.fetch(descriptor).first else { return nil }
-        folder.listState = .claimed
-        try modelContext.save()
-        return FolderDTO(path: folder.folderPath, depth: folder.depth, etag: folder.etag)
+        return try claim(folder)
     }
 
-    /// Atomically claims one specific folder for crawling, but only if it's still
-    /// pending. Returns nil if it's already listed or in flight — so this safely
-    /// front-runs the breadth-first crawl without ever double-listing a folder.
-    func claimSpecificPending(path: String, account: String) throws -> FolderDTO? {
-        guard let folder = try folderState(path: WebDAVPath.normalized(path), account: account),
-              folder.listState == .pending else { return nil }
+    /// Marks a fetched folder as claimed and returns its Sendable snapshot.
+    private func claim(_ folder: FolderState) throws -> FolderDTO {
         folder.listState = .claimed
         try modelContext.save()
         return FolderDTO(path: folder.folderPath, depth: folder.depth, etag: folder.etag)
@@ -147,17 +167,6 @@ actor CacheStore {
     /// The current cover tiles for a folder (for proactive thumbnail prefetch).
     func coverTiles(folderPath: String, account: String) throws -> [CoverTile] {
         try folderState(path: WebDAVPath.normalized(folderPath), account: account)?.coverTiles ?? []
-    }
-
-    /// Full paths of a folder's immediate subfolders, in display (name) order.
-    /// Used to prioritize warming the subfolders the user just navigated into view.
-    func childFolderPaths(parentPath: String, account: String) throws -> [String] {
-        let parent = WebDAVPath.normalized(parentPath)
-        let descriptor = FetchDescriptor<CachedItem>(
-            predicate: #Predicate { $0.parentPath == parent && $0.account == account && $0.isDirectory },
-            sortBy: [SortDescriptor(\.nameKey)]
-        )
-        return try modelContext.fetch(descriptor).map(\.fullPath)
     }
 
     /// Copies each folder's memoized cover tiles from its ``FolderState`` onto the

@@ -99,11 +99,7 @@ struct FolderGridView: View {
             try? await environment.cacheStore.recomputeCoverChain(
                 folderPath: folderPath, rootPath: client.filesRootPath, account: account
             )
-            // Front-run warming for the subfolders now on screen so their 2x2
-            // covers fill in immediately (paths come back in display order).
-            if let subfolders = try? await environment.cacheStore.childFolderPaths(parentPath: folderPath, account: account) {
-                environment.warmingCoordinator?.prioritize(folderPaths: subfolders)
-            }
+            environment.warmingCoordinator?.prioritize(currentFolderPath: folderPath)
         } catch is CancellationError {
             // Navigated away; ignore.
         } catch {

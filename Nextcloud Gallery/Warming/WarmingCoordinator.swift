@@ -12,6 +12,11 @@ import Observation
 /// frontier lives in SwiftData (`FolderState.listState`), so the crawl is
 /// inherently resumable: on every start it just picks up the pending folders.
 ///
+/// The crawl is breadth-first, and biased toward the folder the user is currently
+/// viewing (``prioritize(currentFolderPath:)``): all workers list the visible
+/// folder's subtree first, so tapping a subfolder usually finds it already cached,
+/// then spill back out to the rest of the tree once that subtree is warm.
+///
 /// Cancellable at every `await`; partial progress is always persisted. Runs only
 /// while conditions allow (foreground + Wi-Fi), decided by ``AppEnvironment``.
 @Observable
@@ -31,9 +36,12 @@ final class WarmingCoordinator {
     @ObservationIgnored private let monitor: NetworkMonitor
     @ObservationIgnored private let account: String
     @ObservationIgnored private var crawlTask: Task<Void, Never>?
-    @ObservationIgnored private var priorityTask: Task<Void, Never>?
-    /// Concurrent listings when front-running the visible folder's subfolders.
-    @ObservationIgnored private let priorityConcurrency = 4
+
+    /// The subtree the crawl currently favors: the folder the user last navigated
+    /// into. Workers claim the shallowest pending folder beneath this path before
+    /// touching the global frontier, so the visible folder's descendants warm
+    /// first. Re-pointed on every navigation; `nil` means an unbiased global crawl.
+    @ObservationIgnored private var priorityRoot: String?
 
     /// Number of concurrent folder-listing workers.
     @ObservationIgnored private let workerCount = 5
@@ -55,65 +63,24 @@ final class WarmingCoordinator {
         crawlTask = Task { await runCrawl() }
     }
 
-    /// Pauses warming. Progress is preserved; `start()` resumes from the frontier.
+    /// Pauses warming. Progress is preserved; `start()` resumes from the frontier
+    /// (and keeps the current priority bias).
     func pause() {
-        priorityTask?.cancel()
-        priorityTask = nil
         guard crawlTask != nil else { return }
         crawlTask?.cancel()
         crawlTask = nil
         state = .paused
     }
 
-    /// Front-runs warming for the folders the user just navigated into view, so
-    /// their 2x2 covers fill in immediately instead of waiting for the depth-order
-    /// crawl to reach them. Pass them in display order (top first). Cancels any
-    /// previous prioritization (the current screen is what matters). Respects the
-    /// same Wi-Fi gate as the rest of warming.
-    func prioritize(folderPaths: [String]) {
-        priorityTask?.cancel()
-        guard monitor.isWiFi, !folderPaths.isEmpty else { return }
-        priorityTask = Task { await runPriority(folderPaths) }
-    }
-
-    private func runPriority(_ paths: [String]) async {
-        await withTaskGroup(of: Void.self) { group in
-            var index = 0
-            let initial = min(priorityConcurrency, paths.count)
-            while index < initial {
-                let path = paths[index]
-                group.addTask { await self.warmVisibleSubfolder(path) }
-                index += 1
-            }
-            while await group.next() != nil {
-                guard !Task.isCancelled, index < paths.count else { continue }
-                let path = paths[index]
-                group.addTask { await self.warmVisibleSubfolder(path) }
-                index += 1
-            }
-        }
-        // Note: don't nil `priorityTask` here — a newer prioritize() may have
-        // already replaced it, and we'd clobber the live task.
-    }
-
-    /// Lists a now-visible subfolder if it hasn't been crawled yet (jumping the
-    /// queue), then ensures its cover thumbnails are cached.
-    private func warmVisibleSubfolder(_ path: String) async {
-        guard !Task.isCancelled, monitor.isWiFi else { return }
-        if let folder = try? await cacheStore.claimSpecificPending(path: path, account: account) {
-            do {
-                let files = try await client.listFolder(at: folder.path, queue: networkQueue)
-                try Task.checkCancellation()
-                try await cacheStore.ingest(parentPath: folder.path, account: account, files: files)
-                try? await cacheStore.recomputeCoverChain(
-                    folderPath: folder.path, rootPath: client.filesRootPath, account: account
-                )
-            } catch {
-                try? await cacheStore.markPending(path: folder.path, account: account)
-                return
-            }
-        }
-        await prefetchCoverTiles(for: path)
+    /// When the user navigates into a folder, bias the crawl toward that folder's
+    /// subtree so its descendants are listed before anything else — making the next
+    /// tap feel instant. Each navigation re-points the bias deeper (or to a
+    /// sibling), so the just-entered folder always wins over the one a level up.
+    /// Starts the crawl if it had gone idle; respects the Wi-Fi gate via `start()`.
+    func prioritize(currentFolderPath: String) {
+        guard !currentFolderPath.isEmpty else { return }
+        priorityRoot = WebDAVPath.normalized(currentFolderPath)
+        start()
     }
 
     private func runCrawl() async {
@@ -138,7 +105,9 @@ final class WarmingCoordinator {
     private func worker() async {
         while !Task.isCancelled {
             guard monitor.isWiFi else { return }
-            guard let folder = try? await cacheStore.claimNextPending(account: account) else {
+            // Read the live priority bias each claim, so workers converge on the
+            // folder the user just navigated into within one listing.
+            guard let folder = try? await cacheStore.claimNextPending(under: priorityRoot, account: account) else {
                 return // frontier empty
             }
             do {
