@@ -21,7 +21,7 @@ struct PhotoCellView: View {
                     pixels: NextcloudConfig.gridThumbnailPixels
                 )
             }
-            .clipShape(.rect(cornerRadius: 8))
-            .contentShape(.rect)
+            .clipShape(.rect(cornerRadius: LayoutMetrics.tileCornerRadius))
+            .galleryTileInteraction()
     }
 }

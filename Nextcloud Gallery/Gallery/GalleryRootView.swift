@@ -33,7 +33,7 @@ struct GalleryRootView: View {
                         }
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .primaryAction) {
                     Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right") {
                         environment.signOut()
                     }

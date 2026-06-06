@@ -14,6 +14,7 @@ struct FolderGridView: View {
     let account: String
 
     @Environment(AppEnvironment.self) private var environment
+    @Environment(\.layoutMetrics) private var metrics
     @Query private var items: [CachedItem]
 
     @State private var isLoading = false
@@ -21,7 +22,9 @@ struct FolderGridView: View {
     @State private var presentedPhoto: PhotoItem?
     @State private var viewerPhotos: [PhotoItem] = []
 
-    private let columns = [GridItem(.adaptive(minimum: 110), spacing: 3)]
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: metrics.minGridCellSize), spacing: metrics.gridSpacing)]
+    }
 
     init(folderPath: String, title: String, account: String) {
         self.folderPath = folderPath
@@ -37,7 +40,7 @@ struct FolderGridView: View {
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 3) {
+            LazyVGrid(columns: columns) {
                 ForEach(items, id: \.ocId) { item in
                     if item.isDirectory {
                         NavigationLink(value: FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account)) {
@@ -54,7 +57,7 @@ struct FolderGridView: View {
                     }
                 }
             }
-            .padding(3)
+            .padding(metrics.contentPadding)
         }
         .scrollIndicators(.hidden)
         .navigationTitle(title)
