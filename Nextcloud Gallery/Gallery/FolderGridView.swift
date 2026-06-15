@@ -31,8 +31,15 @@ struct FolderGridView: View {
         self.account = account
 
         let parent = WebDAVPath.normalized(folderPath)
+        // Show subfolders and images only. Non-image files (PDFs, videos, …) have
+        // no image preview, so they'd render as permanently-blank photo cells — and
+        // the image-only viewer can't display them. `classFile == "image"` mirrors
+        // `CachedItem.isPhoto` (which a #Predicate can't call: it isn't stored).
         _items = Query(
-            filter: #Predicate<CachedItem> { $0.parentPath == parent && $0.account == account },
+            filter: #Predicate<CachedItem> {
+                $0.parentPath == parent && $0.account == account
+                    && ($0.isDirectory || $0.classFile == "image")
+            },
             sort: [SortDescriptor(\.kindRank), SortDescriptor(\.nameKey)]
         )
     }
