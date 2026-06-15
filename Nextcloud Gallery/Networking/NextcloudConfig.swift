@@ -34,6 +34,11 @@ nonisolated enum NextcloudConfig {
     /// Larger preview shown first in the full-screen viewer before the full file.
     static let viewerPreviewPixels = 1024
 
+    /// How many of a folder's own photos the trailing thumbnail crawler prefetches
+    /// at grid size ahead of viewing. The rest load on demand as the user scrolls,
+    /// so this stays bounded for huge folders.
+    static let gridThumbnailPrefetchLimit = 30
+
     // MARK: Disk cache budgets
 
     /// Max bytes kept for the thumbnail cache (oldest evicted beyond this).

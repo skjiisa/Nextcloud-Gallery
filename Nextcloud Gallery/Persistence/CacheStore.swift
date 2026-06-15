@@ -142,6 +142,69 @@ actor CacheStore {
         return FolderDTO(path: folder.folderPath, depth: folder.depth, etag: folder.etag)
     }
 
+    // MARK: - Trailing thumbnail crawl
+
+    /// Atomically claims the next *listed* folder whose thumbnails haven't been
+    /// prefetched yet, biasing toward `root` (the folder the user is viewing)
+    /// before the global frontier — so the trailing thumbnail crawler warms the
+    /// visible subtree's images first. Only folders discovery has already listed
+    /// are eligible, so this naturally hangs behind the structural crawl.
+    ///
+    /// Marks the folder ready on claim, both to serialize the small thumbnail pool
+    /// (two workers never pick the same folder) and because the work is best-effort:
+    /// anything missed simply loads on demand. Returns nil when nothing needs it.
+    func claimNextNeedingThumbnails(under root: String?, account: String) throws -> FolderDTO? {
+        let listedRaw = ListState.listed.rawValue
+
+        if let root {
+            let base = WebDAVPath.normalized(root)
+            let prefix = base + "/"
+            var descriptor = FetchDescriptor<FolderState>(
+                predicate: #Predicate {
+                    $0.account == account && $0.listStateRaw == listedRaw && !$0.thumbnailsReady
+                        && ($0.folderPath == base || $0.folderPath.starts(with: prefix))
+                },
+                sortBy: [SortDescriptor(\.depth), SortDescriptor(\.folderPath)]
+            )
+            descriptor.fetchLimit = 1
+            if let folder = try modelContext.fetch(descriptor).first {
+                return try markThumbnailsClaimed(folder)
+            }
+        }
+
+        var descriptor = FetchDescriptor<FolderState>(
+            predicate: #Predicate {
+                $0.account == account && $0.listStateRaw == listedRaw && !$0.thumbnailsReady
+            },
+            sortBy: [SortDescriptor(\.depth), SortDescriptor(\.folderPath)]
+        )
+        descriptor.fetchLimit = 1
+        guard let folder = try modelContext.fetch(descriptor).first else { return nil }
+        return try markThumbnailsClaimed(folder)
+    }
+
+    private func markThumbnailsClaimed(_ folder: FolderState) throws -> FolderDTO {
+        folder.thumbnailsReady = true
+        try modelContext.save()
+        return FolderDTO(path: folder.folderPath, depth: folder.depth, etag: folder.etag)
+    }
+
+    /// Up to `limit` of a folder's own photos (non-folder items with a server
+    /// preview), in the order the grid shows them, as targets for thumbnail
+    /// prefetch. Mirrors ``FolderGridView``'s sort so the first cells warm first.
+    func gridThumbnailTargets(folderPath: String, account: String, limit: Int) throws -> [CoverTile] {
+        let parent = WebDAVPath.normalized(folderPath)
+        var descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate {
+                $0.parentPath == parent && $0.account == account && !$0.isDirectory && $0.hasPreview
+            },
+            sortBy: [SortDescriptor(\.kindRank), SortDescriptor(\.nameKey)]
+        )
+        descriptor.fetchLimit = limit
+        return try modelContext.fetch(descriptor)
+            .map { CoverTile(ocId: $0.ocId, fileId: $0.fileId, etag: $0.etag) }
+    }
+
     /// Returns a claimed/failed folder to the pending frontier.
     func markPending(path: String, account: String) throws {
         guard let folder = try folderState(path: WebDAVPath.normalized(path), account: account) else { return }
