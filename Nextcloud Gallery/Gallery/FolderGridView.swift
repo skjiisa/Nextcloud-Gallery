@@ -20,7 +20,6 @@ struct FolderGridView: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var presentedPhoto: PhotoItem?
-    @State private var viewerPhotos: [PhotoItem] = []
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: metrics.minGridCellSize), spacing: metrics.gridSpacing)]
@@ -65,12 +64,16 @@ struct FolderGridView: View {
         .task(id: folderPath) { await load() }
         .refreshable { await load() }
         .fullScreenCover(item: $presentedPhoto) { photo in
-            PhotoViewerView(photos: viewerPhotos, initialPhotoID: photo.id)
+            // Build the photo list here from the live query so the viewer never
+            // captures a stale snapshot of separate @State (which presented empty).
+            PhotoViewerView(
+                photos: items.filter { !$0.isDirectory }.map(PhotoItem.init(cachedItem:)),
+                initialPhotoID: photo.id
+            )
         }
     }
 
     private func openViewer(at item: CachedItem) {
-        viewerPhotos = items.filter { !$0.isDirectory }.map(PhotoItem.init(cachedItem:))
         presentedPhoto = PhotoItem(cachedItem: item)
     }
 
