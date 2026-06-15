@@ -11,6 +11,7 @@ struct GalleryRootView: View {
     let client: NextcloudClient
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.scenePhase) private var scenePhase
+    @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
@@ -34,10 +35,13 @@ struct GalleryRootView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right") {
-                        environment.signOut()
+                    Button("Settings", systemImage: "gearshape") {
+                        showSettings = true
                     }
                 }
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
             }
         }
         .task { environment.reconcileWarming() }

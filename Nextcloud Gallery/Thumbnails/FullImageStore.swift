@@ -59,4 +59,12 @@ actor FullImageStore {
     func reap(maxBytes: Int) {
         DiskCacheReaper.reap(directory: directory, maxBytes: maxBytes)
     }
+
+    /// Deletes every cached original file, cancelling any in-flight downloads so
+    /// they can't re-create files behind the wipe.
+    func clear() {
+        for task in inFlight.values { task.cancel() }
+        inFlight.removeAll()
+        DiskCacheReaper.clear(directory: directory)
+    }
 }

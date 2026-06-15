@@ -66,6 +66,19 @@ final class AppEnvironment {
         client = nil
     }
 
+    /// Wipes the entire on-device library — cached folder tree, thumbnails, and
+    /// downloaded originals — without signing out. Warming is paused for the wipe
+    /// and then resumed, so the library re-crawls from scratch.
+    func clearLocalCache() async {
+        warmingCoordinator?.pause()
+
+        try? await cacheStore.clearAll()
+        await thumbnailStore.clear()
+        await fullImageStore.clear()
+
+        reconcileWarming()
+    }
+
     // MARK: - Warming control
 
     /// Updates foreground-active state (driven by scenePhase) and reconciles.

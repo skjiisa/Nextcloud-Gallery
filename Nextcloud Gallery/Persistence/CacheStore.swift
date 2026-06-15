@@ -69,6 +69,19 @@ actor CacheStore {
         try modelContext.save()
     }
 
+    /// Deletes the entire cached folder tree and crawl state for every account.
+    /// Deletes row-by-row (rather than a batch `delete(model:)`) so the change
+    /// notifications merge into the main context and the live grid empties at once.
+    func clearAll() throws {
+        for item in try modelContext.fetch(FetchDescriptor<CachedItem>()) {
+            modelContext.delete(item)
+        }
+        for state in try modelContext.fetch(FetchDescriptor<FolderState>()) {
+            modelContext.delete(state)
+        }
+        try modelContext.save()
+    }
+
     /// Whether the given folder has ever been successfully listed.
     func isListed(path: String, account: String) throws -> Bool {
         try folderState(path: WebDAVPath.normalized(path), account: account)?.listState == .listed
