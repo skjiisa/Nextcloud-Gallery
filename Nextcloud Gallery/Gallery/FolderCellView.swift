@@ -19,7 +19,8 @@ struct FolderCellView: View {
             .aspectRatio(1, contentMode: .fit)
             .overlay { artwork }
             .overlay(alignment: .bottom) { nameLabel }
-            .clipShape(.rect(cornerRadius: 8))
+            .clipShape(.rect(cornerRadius: LayoutMetrics.tileCornerRadius))
+            .galleryTileInteraction()
     }
 
     @ViewBuilder

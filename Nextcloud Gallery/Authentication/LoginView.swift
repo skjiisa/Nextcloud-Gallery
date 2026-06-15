@@ -9,20 +9,21 @@ import SwiftUI
 
 struct LoginView: View {
     @Environment(AppEnvironment.self) private var environment
+    @Environment(\.layoutMetrics) private var metrics
     @State private var controller = LoginFlowController()
 
     var body: some View {
         @Bindable var controller = controller
 
         NavigationStack {
-            VStack(spacing: 24) {
+            VStack(spacing: metrics.majorSpacing) {
                 Spacer()
 
                 Image(systemName: "photo.stack")
-                    .font(.system(size: 64))
+                    .font(.system(size: metrics.largeIconSize))
                     .foregroundStyle(.tint)
 
-                VStack(spacing: 8) {
+                VStack(spacing: metrics.controlSpacing / 2) {
                     Text("Nextcloud Gallery")
                         .font(.largeTitle.bold())
                     Text("Sign in to browse your photos.")
@@ -30,7 +31,7 @@ struct LoginView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                VStack(spacing: 12) {
+                VStack(spacing: metrics.controlSpacing) {
                     TextField("cloud.example.com", text: $controller.serverURLString)
                         .textFieldStyle(.roundedBorder)
                         .textContentType(.URL)
@@ -67,7 +68,8 @@ struct LoginView: View {
                 Spacer()
                 Spacer()
             }
-            .padding()
+            .frame(maxWidth: metrics.maxReadableWidth)
+            .padding(metrics.contentPadding)
             .sheet(item: $controller.browserURL, onDismiss: { controller.cancel() }) { item in
                 SafariView(url: item.url)
                     .ignoresSafeArea()
