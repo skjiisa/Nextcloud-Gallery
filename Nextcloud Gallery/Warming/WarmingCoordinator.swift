@@ -8,11 +8,18 @@
 import Foundation
 import Observation
 
-/// Proactively crawls the full folder structure so navigation is smooth. The
-/// frontier lives in SwiftData (`FolderState.listState`), so the crawl is
-/// inherently resumable: on every start it just picks up the pending folders.
+/// Proactively crawls the folder structure so navigation is smooth. Two pools run
+/// concurrently off one resumable frontier (persisted in `FolderState`):
 ///
-/// Cancellable at every `await`; partial progress is always persisted. Runs only
+/// - **Discovery** lists folders breadth-first (`FolderState.listState`), biased to
+///   the folder the user is viewing, so structure is known before it's tapped.
+/// - **Thumbnails** trail behind, prefetching each *listed* folder's cover tiles and
+///   its photos' grid thumbnails (`FolderState.thumbnailsReady`). Kept off the
+///   discovery path so listing — which unlocks navigation — never waits on image
+///   downloads.
+///
+/// Both honor the same priority bias (``prioritize(currentFolderPath:)``) and are
+/// cancellable at every `await`; partial progress is always persisted. Runs only
 /// while conditions allow (foreground + Wi-Fi), decided by ``AppEnvironment``.
 @Observable
 @MainActor
@@ -31,12 +38,23 @@ final class WarmingCoordinator {
     @ObservationIgnored private let monitor: NetworkMonitor
     @ObservationIgnored private let account: String
     @ObservationIgnored private var crawlTask: Task<Void, Never>?
-    @ObservationIgnored private var priorityTask: Task<Void, Never>?
-    /// Concurrent listings when front-running the visible folder's subfolders.
-    @ObservationIgnored private let priorityConcurrency = 4
 
-    /// Number of concurrent folder-listing workers.
-    @ObservationIgnored private let workerCount = 5
+    /// The subtree the crawl currently favors: the folder the user last navigated
+    /// into. Both pools claim the shallowest eligible folder beneath this path
+    /// before touching the global frontier, so the visible folder's descendants
+    /// warm first. Re-pointed on every navigation; `nil` means an unbiased crawl.
+    @ObservationIgnored private var priorityRoot: String?
+
+    /// Live count of discovery workers still running. The thumbnail pool watches
+    /// this so it keeps trailing while folders are still being discovered, then
+    /// drains the backlog and exits once discovery is done.
+    @ObservationIgnored private var activeDiscoveryWorkers = 0
+
+    /// Concurrent folder-listing (discovery) workers.
+    @ObservationIgnored private let discoveryWorkerCount = 5
+    /// Concurrent thumbnail-prefetch workers; deliberately fewer so image downloads
+    /// trail discovery and don't crowd out the photos the user is actively viewing.
+    @ObservationIgnored private let thumbnailWorkerCount = 2
     /// Background queue so PROPFIND parsing never runs on the main thread.
     @ObservationIgnored private let networkQueue = DispatchQueue(label: "app.lyons.Nextcloud-Gallery.warming", qos: .utility)
 
@@ -55,65 +73,25 @@ final class WarmingCoordinator {
         crawlTask = Task { await runCrawl() }
     }
 
-    /// Pauses warming. Progress is preserved; `start()` resumes from the frontier.
+    /// Pauses warming. Progress is preserved; `start()` resumes from the frontier
+    /// (and keeps the current priority bias).
     func pause() {
-        priorityTask?.cancel()
-        priorityTask = nil
         guard crawlTask != nil else { return }
         crawlTask?.cancel()
         crawlTask = nil
         state = .paused
     }
 
-    /// Front-runs warming for the folders the user just navigated into view, so
-    /// their 2x2 covers fill in immediately instead of waiting for the depth-order
-    /// crawl to reach them. Pass them in display order (top first). Cancels any
-    /// previous prioritization (the current screen is what matters). Respects the
-    /// same Wi-Fi gate as the rest of warming.
-    func prioritize(folderPaths: [String]) {
-        priorityTask?.cancel()
-        guard monitor.isWiFi, !folderPaths.isEmpty else { return }
-        priorityTask = Task { await runPriority(folderPaths) }
-    }
-
-    private func runPriority(_ paths: [String]) async {
-        await withTaskGroup(of: Void.self) { group in
-            var index = 0
-            let initial = min(priorityConcurrency, paths.count)
-            while index < initial {
-                let path = paths[index]
-                group.addTask { await self.warmVisibleSubfolder(path) }
-                index += 1
-            }
-            while await group.next() != nil {
-                guard !Task.isCancelled, index < paths.count else { continue }
-                let path = paths[index]
-                group.addTask { await self.warmVisibleSubfolder(path) }
-                index += 1
-            }
-        }
-        // Note: don't nil `priorityTask` here — a newer prioritize() may have
-        // already replaced it, and we'd clobber the live task.
-    }
-
-    /// Lists a now-visible subfolder if it hasn't been crawled yet (jumping the
-    /// queue), then ensures its cover thumbnails are cached.
-    private func warmVisibleSubfolder(_ path: String) async {
-        guard !Task.isCancelled, monitor.isWiFi else { return }
-        if let folder = try? await cacheStore.claimSpecificPending(path: path, account: account) {
-            do {
-                let files = try await client.listFolder(at: folder.path, queue: networkQueue)
-                try Task.checkCancellation()
-                try await cacheStore.ingest(parentPath: folder.path, account: account, files: files)
-                try? await cacheStore.recomputeCoverChain(
-                    folderPath: folder.path, rootPath: client.filesRootPath, account: account
-                )
-            } catch {
-                try? await cacheStore.markPending(path: folder.path, account: account)
-                return
-            }
-        }
-        await prefetchCoverTiles(for: path)
+    /// When the user navigates into a folder, bias both crawls toward that folder's
+    /// subtree so its descendants are listed and its images prefetched before
+    /// anything else — making the next tap feel instant. Each navigation re-points
+    /// the bias deeper (or to a sibling), so the just-entered folder always wins
+    /// over the one a level up. Starts the crawl if it had gone idle; respects the
+    /// Wi-Fi gate via `start()`.
+    func prioritize(currentFolderPath: String) {
+        guard !currentFolderPath.isEmpty else { return }
+        priorityRoot = WebDAVPath.normalized(currentFolderPath)
+        start()
     }
 
     private func runCrawl() async {
@@ -123,9 +101,13 @@ final class WarmingCoordinator {
             try? await cacheStore.seedRoot(path: client.filesRootPath, account: account)
         }
 
+        activeDiscoveryWorkers = discoveryWorkerCount
         await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<workerCount {
-                group.addTask { await self.worker() }
+            for _ in 0..<discoveryWorkerCount {
+                group.addTask { await self.discoveryWorker() }
+            }
+            for _ in 0..<thumbnailWorkerCount {
+                group.addTask { await self.thumbnailWorker() }
             }
         }
 
@@ -135,11 +117,17 @@ final class WarmingCoordinator {
         }
     }
 
-    private func worker() async {
+    /// Lists folders breadth-first, favoring the prioritized subtree, recording each
+    /// listing and refreshing covers. Does *not* download thumbnails — that trails
+    /// in ``thumbnailWorker()`` so discovery never blocks on image transfers.
+    private func discoveryWorker() async {
+        defer { activeDiscoveryWorkers -= 1 }
         while !Task.isCancelled {
             guard monitor.isWiFi else { return }
-            guard let folder = try? await cacheStore.claimNextPending(account: account) else {
-                return // frontier empty
+            // Read the live priority bias each claim, so workers converge on the
+            // folder the user just navigated into within one listing.
+            guard let folder = try? await cacheStore.claimNextPending(under: priorityRoot, account: account) else {
+                return // discovery frontier empty
             }
             do {
                 try Task.checkCancellation()
@@ -149,7 +137,6 @@ final class WarmingCoordinator {
                 try? await cacheStore.recomputeCoverChain(
                     folderPath: folder.path, rootPath: client.filesRootPath, account: account
                 )
-                await prefetchCoverTiles(for: folder.path)
             } catch is CancellationError {
                 try? await cacheStore.markPending(path: folder.path, account: account)
                 return
@@ -160,16 +147,45 @@ final class WarmingCoordinator {
         }
     }
 
-    /// Proactively caches the (up to 4) cover thumbnails for a folder so its 2x2
-    /// composite is ready before the parent grid is ever shown.
-    private func prefetchCoverTiles(for folderPath: String) async {
-        guard let tiles = try? await cacheStore.coverTiles(folderPath: folderPath, account: account) else { return }
-        for tile in tiles {
-            guard !Task.isCancelled, monitor.isWiFi else { return }
-            await thumbnailStore.prefetch(
-                ocId: tile.ocId, fileId: tile.fileId, etag: tile.etag,
-                pixels: NextcloudConfig.coverTilePixels, client: client, queue: networkQueue
-            )
+    /// Trails discovery: prefetches thumbnails for already-listed folders, favoring
+    /// the prioritized subtree. Keeps running (with a short back-off) while
+    /// discovery is still finding folders, then drains the backlog and exits.
+    private func thumbnailWorker() async {
+        while !Task.isCancelled {
+            guard monitor.isWiFi else { return }
+            guard let folder = try? await cacheStore.claimNextNeedingThumbnails(under: priorityRoot, account: account) else {
+                if activeDiscoveryWorkers == 0 { return } // discovery done, backlog drained
+                try? await Task.sleep(for: .milliseconds(250))
+                continue
+            }
+            await prefetchThumbnails(for: folder.path)
+        }
+    }
+
+    /// Caches a folder's images ahead of display: its (up to 4) 2x2 cover tiles
+    /// first, then up to `gridThumbnailPrefetchLimit` of its own photos at grid
+    /// size. Best-effort and Wi-Fi-gated; already-cached thumbnails are skipped
+    /// cheaply by ``ThumbnailStore``.
+    private func prefetchThumbnails(for folderPath: String) async {
+        if let tiles = try? await cacheStore.coverTiles(folderPath: folderPath, account: account) {
+            for tile in tiles {
+                guard !Task.isCancelled, monitor.isWiFi else { return }
+                await thumbnailStore.prefetch(
+                    ocId: tile.ocId, fileId: tile.fileId, etag: tile.etag,
+                    pixels: NextcloudConfig.coverTilePixels, client: client, queue: networkQueue
+                )
+            }
+        }
+        if let photos = try? await cacheStore.gridThumbnailTargets(
+            folderPath: folderPath, account: account, limit: NextcloudConfig.gridThumbnailPrefetchLimit
+        ) {
+            for photo in photos {
+                guard !Task.isCancelled, monitor.isWiFi else { return }
+                await thumbnailStore.prefetch(
+                    ocId: photo.ocId, fileId: photo.fileId, etag: photo.etag,
+                    pixels: NextcloudConfig.gridThumbnailPixels, client: client, queue: networkQueue
+                )
+            }
         }
     }
 }

@@ -26,6 +26,10 @@ nonisolated final class FolderState {
     var coverTiles: [CoverTile]
     /// True once the cover is final (4 tiles, or the subtree is fully crawled).
     var coverResolved: Bool
+    /// True once the trailing thumbnail crawler has prefetched this folder's cover
+    /// tiles and its photos' grid thumbnails. Lets thumbnailing resume across
+    /// launches and trail discovery without re-scanning finished folders.
+    var thumbnailsReady: Bool
     var lastListed: Date?
 
     /// Typed accessor over ``listStateRaw``.
@@ -42,6 +46,7 @@ nonisolated final class FolderState {
         depth: Int = 0,
         coverTiles: [CoverTile] = [],
         coverResolved: Bool = false,
+        thumbnailsReady: Bool = false,
         lastListed: Date? = nil
     ) {
         self.folderPath = folderPath
@@ -51,6 +56,7 @@ nonisolated final class FolderState {
         self.depth = depth
         self.coverTiles = coverTiles
         self.coverResolved = coverResolved
+        self.thumbnailsReady = thumbnailsReady
         self.lastListed = lastListed
     }
 }
