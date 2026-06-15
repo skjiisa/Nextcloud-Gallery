@@ -11,6 +11,18 @@ import Foundation
 /// Used by the thumbnail and full-image caches so a warmed library can't grow
 /// without limit.
 nonisolated enum DiskCacheReaper {
+    /// Removes every file in the cache directory, leaving the directory itself in
+    /// place so the store can keep writing into it.
+    static func clear(directory: URL) {
+        let fileManager = FileManager.default
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ) else { return }
+        for url in urls {
+            try? fileManager.removeItem(at: url)
+        }
+    }
+
     static func reap(directory: URL, maxBytes: Int) {
         let fileManager = FileManager.default
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]

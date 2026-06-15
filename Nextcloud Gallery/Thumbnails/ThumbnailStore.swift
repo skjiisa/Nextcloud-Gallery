@@ -65,4 +65,12 @@ actor ThumbnailStore {
     func reap(maxBytes: Int) {
         DiskCacheReaper.reap(directory: location.directory, maxBytes: maxBytes)
     }
+
+    /// Deletes every cached thumbnail, cancelling any in-flight downloads so they
+    /// can't re-create files behind the wipe.
+    func clear() {
+        for task in inFlight.values { task.cancel() }
+        inFlight.removeAll()
+        DiskCacheReaper.clear(directory: location.directory)
+    }
 }
