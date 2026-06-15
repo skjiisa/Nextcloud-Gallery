@@ -39,6 +39,11 @@ nonisolated enum NextcloudConfig {
     /// so this stays bounded for huge folders.
     static let gridThumbnailPrefetchLimit = 30
 
+    /// Max results requested from a flattened-gallery media SEARCH. Generous so a
+    /// single request covers typical libraries; date-windowed pagination can be
+    /// added later for very large folders.
+    static let mediaSearchLimit = 5000
+
     // MARK: Disk cache budgets
 
     /// Max bytes kept for the thumbnail cache (oldest evicted beyond this).

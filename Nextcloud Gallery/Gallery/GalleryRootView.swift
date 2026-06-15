@@ -23,6 +23,9 @@ struct GalleryRootView: View {
             .navigationDestination(for: FolderRoute.self) { route in
                 FolderGridView(folderPath: route.folderPath, title: route.title, account: route.account)
             }
+            .navigationDestination(for: FlatGalleryRoute.self) { route in
+                FlatGalleryView(folderPath: route.folderPath, title: route.title, account: route.account)
+            }
             .toolbar {
                 if environment.warmingCoordinator?.state == .warming {
                     ToolbarItem(placement: .topBarLeading) {

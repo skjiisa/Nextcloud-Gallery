@@ -1,14 +1,16 @@
 //
-//  FolderGridView.swift
+//  FlatGalleryView.swift
 //  Nextcloud Gallery
 //
-//  A grid of the photos and folders in one folder, backed by the on-disk cache.
+//  All photos under a folder's subtree shown as one continuous, folder-agnostic
+//  collection, newest first. Renders reactively from the local cache while a
+//  recursive server media-SEARCH fills in anything warming hasn't reached yet.
 //
 
 import SwiftUI
 import SwiftData
 
-struct FolderGridView: View {
+struct FlatGalleryView: View {
     let folderPath: String
     let title: String
     let account: String
@@ -21,6 +23,9 @@ struct FolderGridView: View {
     @State private var errorMessage: String?
     @State private var presentedPhoto: PhotoItem?
 
+    // Fixed for now; routed through GallerySortOrder so other orders drop in later.
+    private let sortOrder: GallerySortOrder = .newestFirst
+
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: metrics.minGridCellSize), spacing: metrics.gridSpacing)]
     }
@@ -30,17 +35,17 @@ struct FolderGridView: View {
         self.title = title
         self.account = account
 
-        let parent = WebDAVPath.normalized(folderPath)
-        // Show subfolders and images only. Non-image files (PDFs, videos, …) have
-        // no image preview, so they'd render as permanently-blank photo cells — and
-        // the image-only viewer can't display them. `classFile == "image"` mirrors
-        // `CachedItem.isPhoto` (which a #Predicate can't call: it isn't stored).
+        // Every image whose containing folder is this folder or anything beneath it.
+        // `parentPath` is a photo's immediate folder, so a prefix match on
+        // `base + "/"` captures the whole subtree in one indexed query.
+        let base = WebDAVPath.normalized(folderPath)
+        let prefix = base + "/"
         _items = Query(
             filter: #Predicate<CachedItem> {
-                $0.parentPath == parent && $0.account == account
-                    && ($0.isDirectory || $0.classFile == "image")
+                $0.account == account && $0.classFile == "image"
+                    && ($0.parentPath == base || $0.parentPath.starts(with: prefix))
             },
-            sort: [SortDescriptor(\.kindRank), SortDescriptor(\.nameKey)]
+            sort: GallerySortOrder.newestFirst.sortDescriptors
         )
     }
 
@@ -48,47 +53,29 @@ struct FolderGridView: View {
         ScrollView {
             LazyVGrid(columns: columns) {
                 ForEach(items, id: \.ocId) { item in
-                    if item.isDirectory {
-                        NavigationLink(value: FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account)) {
-                            FolderCellView(item: item)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Button {
-                            openViewer(at: item)
-                        } label: {
-                            PhotoCellView(item: item)
-                        }
-                        .buttonStyle(.plain)
+                    Button {
+                        presentedPhoto = PhotoItem(cachedItem: item)
+                    } label: {
+                        PhotoCellView(item: item)
                     }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(metrics.contentPadding)
         }
         .scrollIndicators(.hidden)
         .navigationTitle(title)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                NavigationLink(value: FlatGalleryRoute(folderPath: folderPath, title: title, account: account)) {
-                    Label("Gallery", systemImage: "square.grid.3x3")
-                }
-            }
-        }
         .overlay { statusOverlay }
         .task(id: folderPath) { await load() }
         .refreshable { await load() }
         .fullScreenCover(item: $presentedPhoto) { photo in
-            // Build the photo list here from the live query so the viewer never
-            // captures a stale snapshot of separate @State (which presented empty).
+            // Build the list from the live query so the viewer never captures a
+            // stale snapshot (mirrors FolderGridView).
             PhotoViewerView(
-                photos: items.filter { !$0.isDirectory }.map(PhotoItem.init(cachedItem:)),
+                photos: items.map(PhotoItem.init(cachedItem:)),
                 initialPhotoID: photo.id
             )
         }
-    }
-
-    private func openViewer(at item: CachedItem) {
-        presentedPhoto = PhotoItem(cachedItem: item)
     }
 
     @ViewBuilder
@@ -104,7 +91,7 @@ struct FolderGridView: View {
                 Button("Retry") { Task { await load() } }
             }
         } else if items.isEmpty && !isLoading {
-            ContentUnavailableView("No Photos", systemImage: "photo.on.rectangle", description: Text("This folder is empty."))
+            ContentUnavailableView("No Photos", systemImage: "photo.on.rectangle", description: Text("This folder has no photos."))
         }
     }
 
@@ -114,11 +101,8 @@ struct FolderGridView: View {
         errorMessage = nil
         defer { isLoading = false }
         do {
-            let files = try await client.listFolder(at: folderPath)
-            try await environment.cacheStore.ingest(parentPath: folderPath, account: account, files: files)
-            try? await environment.cacheStore.recomputeCoverChain(
-                folderPath: folderPath, rootPath: client.filesRootPath, account: account
-            )
+            let files = try await client.searchMedia(under: folderPath)
+            try await environment.cacheStore.ingestSearchResults(files: files, account: account)
             environment.warmingCoordinator?.prioritize(currentFolderPath: folderPath)
         } catch is CancellationError {
             // Navigated away; ignore.

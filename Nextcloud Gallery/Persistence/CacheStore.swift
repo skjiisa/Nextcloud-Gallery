@@ -69,6 +69,27 @@ actor CacheStore {
         try modelContext.save()
     }
 
+    /// Upserts image results from a recursive media SEARCH (which span many
+    /// folders) into the cache. Unlike ``ingest``, this does NOT prune: the search
+    /// is scoped and capped, so absence from a batch doesn't mean an item is gone.
+    /// Leaves ``FolderState`` and covers untouched — warming still owns the folder
+    /// structure; this only ensures the flattened gallery's photos are present.
+    func ingestSearchResults(files: [NKFile], account: String) throws {
+        guard !files.isEmpty else { return }
+        var changed = false
+        for file in files where !file.directory && file.classFile == "image" {
+            let parentPath = WebDAVPath.normalized(file.serverUrl)
+            let fullPath = WebDAVPath.normalized(file.serverUrl + "/" + file.fileName)
+            if let existing = try item(ocId: file.ocId, account: account) {
+                existing.apply(file: file, parentPath: parentPath, fullPath: fullPath, account: account)
+            } else {
+                modelContext.insert(CachedItem(file: file, parentPath: parentPath, fullPath: fullPath, account: account))
+            }
+            changed = true
+        }
+        if changed { try modelContext.save() }
+    }
+
     /// Deletes the entire cached folder tree and crawl state for every account.
     /// Deletes row-by-row (rather than a batch `delete(model:)`) so the change
     /// notifications merge into the main context and the live grid empties at once.
@@ -391,6 +412,15 @@ actor CacheStore {
             predicate: #Predicate { $0.parentPath == parentPath && $0.account == account }
         )
         return try modelContext.fetch(descriptor)
+    }
+
+    /// The cached item with this unique server id, if present.
+    private func item(ocId: String, account: String) throws -> CachedItem? {
+        var descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate { $0.ocId == ocId && $0.account == account }
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
     }
 
     private func folderState(path: String, account: String) throws -> FolderState? {
