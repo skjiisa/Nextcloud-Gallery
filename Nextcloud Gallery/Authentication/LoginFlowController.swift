@@ -33,12 +33,27 @@ final class LoginFlowController {
     var onComplete: ((AccountCredentials) -> Void)?
 
     private var pollTask: Task<Void, Never>?
+    /// The web login URL for the in-flight flow, kept so the browser can be
+    /// reopened if the user (or the system, on visionOS) closes the in-app view.
+    private var loginURL: URL?
+
+    /// How long to keep polling for a grant before giving up. Comfortably within
+    /// the server's login-flow token lifetime, but bounded so we don't poll forever.
+    private let pollDeadline: Duration = .seconds(15 * 60)
 
     var isBusy: Bool {
         switch phase {
         case .starting, .awaitingGrant, .finishing: true
         case .idle, .failed: false
         }
+    }
+
+    /// True while we're polling but the in-app browser is closed — e.g. the login
+    /// moved to external Safari, or the user dismissed the in-app view. The view
+    /// shows a "waiting / reopen / cancel" affordance in this state.
+    var isAwaitingInBackground: Bool {
+        if case .awaitingGrant = phase { return browserURL == nil }
+        return false
     }
 
     /// Begins the login flow for the entered server address.
@@ -58,30 +73,62 @@ final class LoginFlowController {
             return
         }
 
+        loginURL = begin.login
         browserURL = IdentifiableURL(url: begin.login)
         phase = .awaitingGrant
         startPolling(token: begin.token, endpoint: begin.endpoint)
     }
 
-    /// Cancels an in-flight flow (e.g. the user dismissed the browser).
+    /// The in-app browser sheet was dismissed. We deliberately keep polling: the
+    /// user may be finishing in external Safari (the case on visionOS, where the
+    /// system can punt the page out of the in-app view), or they closed it by
+    /// accident and can reopen. Explicit ``cancel()`` is the only thing that stops
+    /// the flow.
+    func browserDismissed() {
+        browserURL = nil
+    }
+
+    /// Re-presents the in-app browser for the in-flight flow (e.g. after the user
+    /// dismissed it but still wants to sign in here rather than in Safari).
+    func reopenBrowser() {
+        guard case .awaitingGrant = phase, let loginURL else { return }
+        browserURL = IdentifiableURL(url: loginURL)
+    }
+
+    /// Cancels an in-flight flow (explicit user action).
     func cancel() {
         pollTask?.cancel()
         pollTask = nil
         browserURL = nil
+        loginURL = nil
         if isBusy { phase = .idle }
     }
 
     private func startPolling(token: String, endpoint: String) {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
+            let deadline = ContinuousClock.now.advanced(by: self?.pollDeadline ?? .seconds(900))
             while !Task.isCancelled {
                 if let grant = await NextcloudClient.pollLogin(token: token, endpoint: endpoint) {
                     await self?.finish(grant)
                     return
                 }
+                if ContinuousClock.now >= deadline {
+                    await self?.timeOut()
+                    return
+                }
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+    }
+
+    /// Polling ran past its deadline without a grant. Surface a retryable error.
+    private func timeOut() {
+        guard case .awaitingGrant = phase else { return }
+        pollTask = nil
+        browserURL = nil
+        loginURL = nil
+        phase = .failed(GalleryError.loginFailed.userMessage)
     }
 
     private func finish(_ grant: (server: String, loginName: String, appPassword: String)) async {
