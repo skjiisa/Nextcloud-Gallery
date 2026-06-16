@@ -67,6 +67,13 @@ struct FolderGridView: View {
         }
         .scrollIndicators(.hidden)
         .navigationTitle(title)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                NavigationLink(value: FlatGalleryRoute(folderPath: folderPath, title: title, account: account)) {
+                    Label("Gallery", systemImage: "square.grid.3x3")
+                }
+            }
+        }
         .overlay { statusOverlay }
         .task(id: folderPath) { await load() }
         .refreshable { await load() }

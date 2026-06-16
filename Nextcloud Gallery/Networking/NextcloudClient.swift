@@ -61,10 +61,90 @@ nonisolated final class NextcloudClient: Sendable {
         return files
     }
 
+    // MARK: - Media search
+
+    /// Recursively searches a folder's subtree for image files, newest first, and
+    /// returns the raw server entries. Mirrors the official app's gallery tab: a
+    /// WebDAV SEARCH scoped to the folder with `depth: infinity`, ordered by last
+    /// modified descending. Pass a background `queue` so XML parsing stays off the
+    /// main thread.
+    func searchMedia(
+        under folderPath: String,
+        limit: Int = NextcloudConfig.mediaSearchLimit,
+        queue: DispatchQueue = .main
+    ) async throws -> [NKFile] {
+        // The SEARCH endpoint lives at `urlBase + "/remote.php/dav"`; the scope
+        // `href` is the DAV-root-relative path, i.e. "/files/<userId>/<subpath>".
+        let root = WebDAVPath.normalized(filesRootPath)
+        let normalized = WebDAVPath.normalized(folderPath)
+        let subPath = normalized.hasPrefix(root) ? String(normalized.dropFirst(root.count)) : ""
+        let href = Self.xmlEscaped("/files/" + credentials.userId + subPath)
+
+        let body = """
+        <?xml version="1.0"?>
+        <d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+        <d:basicsearch>
+        <d:select>
+            <d:prop>
+        \(NKProperties.properties(createProperties: nil))
+            </d:prop>
+        </d:select>
+        <d:from>
+            <d:scope>
+                <d:href>\(href)</d:href>
+                <d:depth>infinity</d:depth>
+            </d:scope>
+        </d:from>
+        <d:orderby>
+            <d:order>
+                <d:prop><d:getlastmodified/></d:prop>
+                <d:descending/>
+            </d:order>
+            <d:order>
+                <d:prop><d:displayname/></d:prop>
+                <d:descending/>
+            </d:order>
+        </d:orderby>
+        <d:where>
+            <d:like>
+                <d:prop><d:getcontenttype/></d:prop>
+                <d:literal>image/%</d:literal>
+            </d:like>
+        </d:where>
+        <d:limit>
+            <d:nresults>\(limit)</d:nresults>
+        </d:limit>
+        </d:basicsearch>
+        </d:searchrequest>
+        """
+
+        let options = NKRequestOptions(queue: queue)
+        let result = await NextcloudKit.shared.searchBodyRequestAsync(
+            serverUrl: credentials.urlBase,
+            requestBody: body,
+            showHiddenFiles: false,
+            account: credentials.account,
+            options: options
+        )
+        guard result.error == .success else { throw GalleryError(result.error) }
+        return result.files ?? []
+    }
+
+    /// Minimal XML text escaping for a path interpolated into the SEARCH body.
+    private static func xmlEscaped(_ string: String) -> String {
+        string
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
     // MARK: - Thumbnails
 
-    /// Downloads a square, server-cropped preview for an item and returns the
-    /// JPEG bytes. Only valid for items whose `hasPreview` is true.
+    /// Downloads a server preview for an item and returns the JPEG bytes. Only
+    /// valid for items whose `hasPreview` is true. Uses NextcloudKit's default
+    /// `crop: 1` — which on Nextcloud means *keep aspect ratio* (the preview fits
+    /// within `pixels`, it is not square-cropped), so callers can show it either
+    /// cropped (`scaledToFill`) or letterboxed (`scaledToFit`) client-side.
     func downloadPreview(
         fileId: String,
         etag: String,
