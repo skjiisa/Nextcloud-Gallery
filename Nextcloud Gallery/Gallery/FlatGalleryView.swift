@@ -16,49 +16,48 @@ struct FlatGalleryView: View {
     let account: String
 
     @Environment(AppEnvironment.self) private var environment
+    // The browse tab owns the ordering + appearance, so each tab remembers its
+    // own (one sorted by date, another by folder, at different zooms).
+    @Environment(BrowseTab.self) private var tab
 
     @State private var isLoading = false
     @State private var errorMessage: String?
 
-    // Persisted, nav-bar-driven ordering + appearance.
-    @AppStorage("flatGallerySort") private var sortRaw = GallerySortOrder.newestFirst.rawValue
-    @AppStorage("flatGalleryZoom") private var zoomRaw = GalleryGridZoom.medium.rawValue
-    @AppStorage("flatGalleryAspectFill") private var aspectFill = true
-
-    private var sortOrder: GallerySortOrder { GallerySortOrder(rawValue: sortRaw) ?? .newestFirst }
-    private var zoom: GalleryGridZoom { GalleryGridZoom(rawValue: zoomRaw) ?? .medium }
-    private var contentMode: ContentMode { aspectFill ? .fill : .fit }
+    private var contentMode: ContentMode { tab.aspectFill ? .fill : .fit }
 
     var body: some View {
+        @Bindable var tab = tab
+
         // The grid lives in a child so changing the sort rebuilds its `@Query`
         // with new descriptors (a `@Query`'s sort is otherwise fixed at init).
         FlatGalleryGrid(
             folderPath: folderPath,
             account: account,
-            sortDescriptors: sortOrder.sortDescriptors,
-            zoom: zoom,
+            sortDescriptors: tab.sort.sortDescriptors,
+            zoom: tab.zoom,
             contentMode: contentMode,
             isLoading: isLoading,
             errorMessage: errorMessage,
-            refresh: { await load() }
+            refresh: { await load() },
+            openPhoto: { photos, id in tab.openViewer(photos: photos, initialID: id) }
         )
         .navigationTitle(title)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                sortMenu
-                aspectButton
-                zoomOutButton
-                zoomInButton
+                sortMenu(tab: tab)
+                aspectButton(tab: tab)
+                zoomOutButton(tab: tab)
+                zoomInButton(tab: tab)
             }
         }
         .task(id: folderPath) { await load() }
     }
 
-    private var sortMenu: some View {
+    private func sortMenu(tab: BrowseTab) -> some View {
         Menu {
-            Picker("Sort", selection: $sortRaw) {
+            Picker("Sort", selection: Bindable(tab).sort) {
                 ForEach(GallerySortOrder.allCases) { order in
-                    Label(order.label, systemImage: order.symbol).tag(order.rawValue)
+                    Label(order.label, systemImage: order.symbol).tag(order)
                 }
             }
         } label: {
@@ -66,31 +65,31 @@ struct FlatGalleryView: View {
         }
     }
 
-    private var aspectButton: some View {
+    private func aspectButton(tab: BrowseTab) -> some View {
         Button {
-            aspectFill.toggle()
+            tab.aspectFill.toggle()
         } label: {
-            Label(aspectFill ? "Aspect Fit" : "Aspect Fill",
-                  systemImage: aspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+            Label(tab.aspectFill ? "Aspect Fit" : "Aspect Fill",
+                  systemImage: tab.aspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
         }
     }
 
-    private var zoomOutButton: some View {
+    private func zoomOutButton(tab: BrowseTab) -> some View {
         Button {
-            zoomRaw = zoom.zoomedOut.rawValue
+            tab.zoom = tab.zoom.zoomedOut
         } label: {
             Label("Zoom Out", systemImage: "minus.magnifyingglass")
         }
-        .disabled(!zoom.canZoomOut)
+        .disabled(!tab.zoom.canZoomOut)
     }
 
-    private var zoomInButton: some View {
+    private func zoomInButton(tab: BrowseTab) -> some View {
         Button {
-            zoomRaw = zoom.zoomedIn.rawValue
+            tab.zoom = tab.zoom.zoomedIn
         } label: {
             Label("Zoom In", systemImage: "plus.magnifyingglass")
         }
-        .disabled(!zoom.canZoomIn)
+        .disabled(!tab.zoom.canZoomIn)
     }
 
     private func load() async {
@@ -131,10 +130,12 @@ private struct FlatGalleryGrid: View {
     let isLoading: Bool
     let errorMessage: String?
     let refresh: () async -> Void
+    /// Opens the viewer on the tab. The grid supplies its live, in-order photo
+    /// list so the viewer pages in the same order it's shown.
+    let openPhoto: ([PhotoItem], String) -> Void
 
     @Environment(\.layoutMetrics) private var metrics
     @Query private var items: [CachedItem]
-    @State private var presentedPhoto: PhotoItem?
 
     /// Tight, Photos-style inter-tile gap and outer margin.
     private let tileSpacing: CGFloat = 2
@@ -151,7 +152,8 @@ private struct FlatGalleryGrid: View {
         contentMode: ContentMode,
         isLoading: Bool,
         errorMessage: String?,
-        refresh: @escaping () async -> Void
+        refresh: @escaping () async -> Void,
+        openPhoto: @escaping ([PhotoItem], String) -> Void
     ) {
         self.folderPath = folderPath
         self.account = account
@@ -160,6 +162,7 @@ private struct FlatGalleryGrid: View {
         self.isLoading = isLoading
         self.errorMessage = errorMessage
         self.refresh = refresh
+        self.openPhoto = openPhoto
 
         // Every image whose containing folder is this folder or anything beneath it.
         // `parentPath` is a photo's immediate folder, so a prefix match on
@@ -180,7 +183,10 @@ private struct FlatGalleryGrid: View {
             LazyVGrid(columns: columns, spacing: tileSpacing) {
                 ForEach(items, id: \.ocId) { item in
                     Button {
-                        presentedPhoto = PhotoItem(cachedItem: item)
+                        // Build the list from the live query so the viewer shows the
+                        // photos in the same order — and never captures an empty/stale
+                        // snapshot. The tab holds the presentation (see TabContentView).
+                        openPhoto(items.map(PhotoItem.init(cachedItem:)), item.ocId)
                     } label: {
                         PhotoCellView(item: item, contentMode: contentMode, cornerRadius: zoom.cornerRadius)
                     }
@@ -194,14 +200,6 @@ private struct FlatGalleryGrid: View {
         .scrollIndicators(.hidden)
         .overlay { statusOverlay }
         .refreshable { await refresh() }
-        .fullScreenCover(item: $presentedPhoto) { photo in
-            // Build the list from the live query so the viewer shows the photos in
-            // the same order — and never captures a stale snapshot.
-            PhotoViewerView(
-                photos: items.map(PhotoItem.init(cachedItem:)),
-                initialPhotoID: photo.id
-            )
-        }
     }
 
     @ViewBuilder

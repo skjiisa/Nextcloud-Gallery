@@ -15,11 +15,12 @@ struct FolderGridView: View {
 
     @Environment(AppEnvironment.self) private var environment
     @Environment(\.layoutMetrics) private var metrics
+    @Environment(BrowseTab.self) private var tab
+    @Environment(TabsModel.self) private var tabs
     @Query private var items: [CachedItem]
 
     @State private var isLoading = false
     @State private var errorMessage: String?
-    @State private var presentedPhoto: PhotoItem?
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: metrics.minGridCellSize), spacing: metrics.gridSpacing)]
@@ -49,10 +50,18 @@ struct FolderGridView: View {
             LazyVGrid(columns: columns) {
                 ForEach(items, id: \.ocId) { item in
                     if item.isDirectory {
-                        NavigationLink(value: FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account)) {
+                        let route = FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account)
+                        NavigationLink(value: BrowseRoute.folder(route)) {
                             FolderCellView(item: item)
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                tabs.open(.folder(route), inNewTab: true)
+                            } label: {
+                                Label("Open in New Tab", systemImage: "plus.square.on.square")
+                            }
+                        }
                     } else {
                         Button {
                             openViewer(at: item)
@@ -69,7 +78,7 @@ struct FolderGridView: View {
         .navigationTitle(title)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                NavigationLink(value: FlatGalleryRoute(folderPath: folderPath, title: title, account: account)) {
+                NavigationLink(value: BrowseRoute.flat(FlatGalleryRoute(folderPath: folderPath, title: title, account: account))) {
                     Label("Gallery", systemImage: "square.grid.3x3")
                 }
             }
@@ -77,18 +86,16 @@ struct FolderGridView: View {
         .overlay { statusOverlay }
         .task(id: folderPath) { await load() }
         .refreshable { await load() }
-        .fullScreenCover(item: $presentedPhoto) { photo in
-            // Build the photo list here from the live query so the viewer never
-            // captures a stale snapshot of separate @State (which presented empty).
-            PhotoViewerView(
-                photos: items.filter { !$0.isDirectory }.map(PhotoItem.init(cachedItem:)),
-                initialPhotoID: photo.id
-            )
-        }
     }
 
     private func openViewer(at item: CachedItem) {
-        presentedPhoto = PhotoItem(cachedItem: item)
+        // Hand the viewer the live photo list (built here, never empty) so it can
+        // page across the folder. The presentation itself lives on the tab — set
+        // in `TabContentView` — so the open photo survives switching tabs.
+        tab.openViewer(
+            photos: items.filter { !$0.isDirectory }.map(PhotoItem.init(cachedItem:)),
+            initialID: item.ocId
+        )
     }
 
     @ViewBuilder
