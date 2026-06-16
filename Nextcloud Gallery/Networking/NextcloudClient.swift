@@ -140,8 +140,11 @@ nonisolated final class NextcloudClient: Sendable {
 
     // MARK: - Thumbnails
 
-    /// Downloads a square, server-cropped preview for an item and returns the
-    /// JPEG bytes. Only valid for items whose `hasPreview` is true.
+    /// Downloads a server preview for an item and returns the JPEG bytes. Only
+    /// valid for items whose `hasPreview` is true. Uses NextcloudKit's default
+    /// `crop: 1` — which on Nextcloud means *keep aspect ratio* (the preview fits
+    /// within `pixels`, it is not square-cropped), so callers can show it either
+    /// cropped (`scaledToFill`) or letterboxed (`scaledToFit`) client-side.
     func downloadPreview(
         fileId: String,
         etag: String,

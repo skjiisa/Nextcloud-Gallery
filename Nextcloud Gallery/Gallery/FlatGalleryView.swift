@@ -23,11 +23,21 @@ struct FlatGalleryView: View {
     @State private var errorMessage: String?
     @State private var presentedPhoto: PhotoItem?
 
+    // Grid appearance, persisted across launches and toggled from the nav bar.
+    @AppStorage("flatGalleryZoom") private var zoomRaw = GalleryGridZoom.medium.rawValue
+    @AppStorage("flatGalleryAspectFill") private var aspectFill = true
+
     // Fixed for now; routed through GallerySortOrder so other orders drop in later.
     private let sortOrder: GallerySortOrder = .newestFirst
 
+    /// Tight, Photos-style inter-tile gap and outer margin.
+    private let tileSpacing: CGFloat = 2
+
+    private var zoom: GalleryGridZoom { GalleryGridZoom(rawValue: zoomRaw) ?? .medium }
+    private var contentMode: ContentMode { aspectFill ? .fill : .fit }
+
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: metrics.minGridCellSize), spacing: metrics.gridSpacing)]
+        [GridItem(.adaptive(minimum: metrics.minGridCellSize * zoom.cellSizeMultiplier), spacing: tileSpacing)]
     }
 
     init(folderPath: String, title: String, account: String) {
@@ -51,20 +61,37 @@ struct FlatGalleryView: View {
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: columns) {
+            LazyVGrid(columns: columns, spacing: tileSpacing) {
                 ForEach(items, id: \.ocId) { item in
                     Button {
                         presentedPhoto = PhotoItem(cachedItem: item)
                     } label: {
-                        PhotoCellView(item: item)
+                        PhotoCellView(item: item, contentMode: contentMode, cornerRadius: zoom.cornerRadius)
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(metrics.contentPadding)
+            .padding(tileSpacing)
+            .animation(.snappy, value: zoomRaw)
+            .animation(.snappy, value: aspectFill)
         }
         .scrollIndicators(.hidden)
         .navigationTitle(title)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    aspectFill.toggle()
+                } label: {
+                    Label(aspectFill ? "Aspect Fit" : "Aspect Fill",
+                          systemImage: aspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                Button {
+                    zoomRaw = zoom.next.rawValue
+                } label: {
+                    Label("Zoom", systemImage: zoom.symbol)
+                }
+            }
+        }
         .overlay { statusOverlay }
         .task(id: folderPath) { await load() }
         .refreshable { await load() }
