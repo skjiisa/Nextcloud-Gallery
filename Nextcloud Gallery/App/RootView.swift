@@ -14,7 +14,7 @@ struct RootView: View {
     var body: some View {
         Group {
             if environment.isSignedIn, let client = environment.client {
-                GalleryRootView(client: client)
+                TabbedGalleryView(client: client)
             } else {
                 LoginView()
             }

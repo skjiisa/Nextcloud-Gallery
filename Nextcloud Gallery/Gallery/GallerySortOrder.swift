@@ -12,7 +12,7 @@ import SwiftData
 /// A sort order for the flattened gallery, selectable from the nav bar. Add a
 /// case here, a branch in ``sortDescriptors``, and a `label`/`symbol` to introduce
 /// a new order — the picker is built from `allCases`.
-nonisolated enum GallerySortOrder: String, CaseIterable, Identifiable, Sendable {
+nonisolated enum GallerySortOrder: String, CaseIterable, Identifiable, Codable, Sendable {
     /// Newest modification date first — matches the official app's gallery tab.
     case newestFirst
     /// The order photos appear when browsing the folder tree, flattened: grouped

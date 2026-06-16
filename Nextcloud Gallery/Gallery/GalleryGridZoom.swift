@@ -10,7 +10,7 @@ import SwiftUI
 /// How densely the flattened gallery packs its photos. Lower levels show more,
 /// smaller tiles; higher levels show fewer, larger ones — the nav-bar button
 /// cycles through them. Add a case (and a branch below) to introduce a level.
-nonisolated enum GalleryGridZoom: Int, CaseIterable, Identifiable, Sendable {
+nonisolated enum GalleryGridZoom: Int, CaseIterable, Identifiable, Codable, Sendable {
     case dense = 0   // most columns, smallest photos
     case medium
     case large

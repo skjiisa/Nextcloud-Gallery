@@ -11,6 +11,7 @@ struct PhotoViewerView: View {
     let photos: [PhotoItem]
 
     @Environment(AppEnvironment.self) private var environment
+    @Environment(TabsModel.self) private var tabs
     @Environment(\.dismiss) private var dismiss
 
     @State private var currentID: String?
@@ -23,6 +24,8 @@ struct PhotoViewerView: View {
     }
 
     var body: some View {
+        @Bindable var tabs = tabs
+
         NavigationStack {
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 0) {
@@ -49,6 +52,16 @@ struct PhotoViewerView: View {
                 ToolbarItem(placement: .primaryAction) {
                     saveButton
                 }
+                // Reach the switcher without closing the photo — so this tab can
+                // stay parked on a single image while you browse another tab. The
+                // open photo is restored when you switch back (it lives on the tab).
+                ToolbarItem(placement: .bottomBar) {
+                    Button {
+                        tabs.openSwitcher()
+                    } label: {
+                        Label("Show Tabs", systemImage: "square.on.square")
+                    }
+                }
             }
             .alert("Couldn't Save Photo", isPresented: showErrorBinding) {
                 Button("OK", role: .cancel) { saver.reset() }
@@ -57,6 +70,14 @@ struct PhotoViewerView: View {
             }
         }
         .preferredColorScheme(.dark)
+        // The viewer is the top-most cover while a photo is open, so it hosts the
+        // switcher. Picking another tab changes the active tab, which rebuilds the
+        // tab container and tears this viewer down — leaving this tab's open photo
+        // in the model, ready to restore when you come back.
+        .fullScreenCover(isPresented: $tabs.isShowingSwitcher) {
+            TabSwitcherView()
+                .environment(tabs)
+        }
     }
 
     private var currentPhoto: PhotoItem? {
