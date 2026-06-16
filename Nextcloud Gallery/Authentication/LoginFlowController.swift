@@ -114,7 +114,7 @@ final class LoginFlowController {
                     return
                 }
                 if ContinuousClock.now >= deadline {
-                    await self?.timeOut()
+                    self?.timeOut()
                     return
                 }
                 try? await Task.sleep(for: .seconds(1))

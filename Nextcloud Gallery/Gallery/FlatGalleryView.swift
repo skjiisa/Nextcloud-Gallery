@@ -101,8 +101,18 @@ struct FlatGalleryView: View {
         errorMessage = nil
         defer { isLoading = false }
         do {
-            let files = try await client.searchMedia(under: folderPath)
-            try await environment.cacheStore.ingestSearchResults(files: files, account: account)
+            let limit = NextcloudConfig.mediaSearchLimit
+            let files = try await client.searchMedia(under: folderPath, limit: limit)
+            // Upsert the results and prune any image the (complete) search no longer
+            // returns — i.e. deleted on the server. Kept in CacheStore so the view
+            // doesn't touch NKFile members.
+            try await environment.cacheStore.reconcileSearchResults(
+                under: folderPath,
+                rootPath: client.filesRootPath,
+                account: account,
+                files: files,
+                limit: limit
+            )
             environment.warmingCoordinator?.prioritize(currentFolderPath: folderPath)
         } catch is CancellationError {
             // Navigated away; ignore.

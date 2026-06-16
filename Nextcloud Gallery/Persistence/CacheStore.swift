@@ -90,6 +90,75 @@ actor CacheStore {
         if changed { try modelContext.save() }
     }
 
+    /// One-shot reconciliation for a flattened gallery's recursive media search:
+    /// upserts the returned images, then prunes any cached image under the subtree
+    /// the (complete) search didn't return. `limit` is the search's requested cap; a
+    /// result below it is treated as the authoritative full set. Keeping the `NKFile`
+    /// handling here lets the view stay free of a NextcloudKit import.
+    func reconcileSearchResults(
+        under folderPath: String,
+        rootPath: String,
+        account: String,
+        files: [NKFile],
+        limit: Int
+    ) throws {
+        try ingestSearchResults(files: files, account: account)
+        try pruneMissingImages(
+            under: folderPath,
+            rootPath: rootPath,
+            account: account,
+            liveOcIds: Set(files.map(\.ocId)),
+            complete: files.count < limit
+        )
+    }
+
+    /// Reconciles cached images under a subtree against the authoritative set a
+    /// complete recursive media search returned: any cached image whose `ocId`
+    /// isn't in `liveOcIds` was removed on the server, so it's deleted here, and
+    /// the covers of folders that lost a photo are recomputed so stale 2x2 tiles
+    /// disappear too. Returns how many rows were pruned.
+    ///
+    /// `complete` must be true ONLY when the search returned the full set (its
+    /// result count was below the request limit). A truncated search is not
+    /// authoritative — pruning against it would delete live images beyond the cap —
+    /// so this no-ops when `complete` is false. Only `classFile == "image"` rows are
+    /// considered, matching the image-only search; folders and videos are untouched.
+    @discardableResult
+    func pruneMissingImages(
+        under folderPath: String,
+        rootPath: String,
+        account: String,
+        liveOcIds: Set<String>,
+        complete: Bool
+    ) throws -> Int {
+        guard complete else { return 0 }
+        let base = WebDAVPath.normalized(folderPath)
+        let prefix = base + "/"
+        let descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate {
+                $0.account == account && $0.classFile == "image"
+                    && ($0.parentPath == base || $0.parentPath.starts(with: prefix))
+            }
+        )
+
+        var affectedParents = Set<String>()
+        var removed = 0
+        for item in try modelContext.fetch(descriptor) where !liveOcIds.contains(item.ocId) {
+            affectedParents.insert(item.parentPath)
+            modelContext.delete(item)
+            removed += 1
+        }
+        guard removed > 0 else { return 0 }
+        try modelContext.save()
+
+        // Refresh covers for every folder that lost a photo (and its ancestors), so
+        // a deleted cover tile is replaced rather than left as a broken thumbnail.
+        for parent in affectedParents {
+            try? recomputeCoverChain(folderPath: parent, rootPath: rootPath, account: account)
+        }
+        return removed
+    }
+
     /// Deletes the entire cached folder tree and crawl state for every account.
     /// Deletes row-by-row (rather than a batch `delete(model:)`) so the change
     /// notifications merge into the main context and the live grid empties at once.
