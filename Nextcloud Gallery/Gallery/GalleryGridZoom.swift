@@ -40,18 +40,12 @@ nonisolated enum GalleryGridZoom: Int, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// SF Symbol shown on the zoom button, reflecting the current density.
-    var symbol: String {
-        switch self {
-        case .dense: "square.grid.3x3.fill"
-        case .medium: "square.grid.3x3"
-        case .large: "square.grid.2x2"
-        case .single: "square"
-        }
-    }
+    /// One step toward larger photos / fewer columns (clamped at the top level).
+    var zoomedIn: GalleryGridZoom { GalleryGridZoom(rawValue: rawValue + 1) ?? self }
+    /// One step toward smaller photos / more columns (clamped at the bottom level).
+    var zoomedOut: GalleryGridZoom { GalleryGridZoom(rawValue: rawValue - 1) ?? self }
 
-    /// The next level, wrapping around so one button cycles through them all.
-    var next: GalleryGridZoom {
-        GalleryGridZoom(rawValue: rawValue + 1) ?? .dense
-    }
+    /// Whether there's a larger / smaller level to move to (for disabling buttons).
+    var canZoomIn: Bool { GalleryGridZoom(rawValue: rawValue + 1) != nil }
+    var canZoomOut: Bool { GalleryGridZoom(rawValue: rawValue - 1) != nil }
 }

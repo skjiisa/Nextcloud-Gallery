@@ -86,10 +86,17 @@ struct FlatGalleryView: View {
                           systemImage: aspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                 }
                 Button {
-                    zoomRaw = zoom.next.rawValue
+                    zoomRaw = zoom.zoomedOut.rawValue
                 } label: {
-                    Label("Zoom", systemImage: zoom.symbol)
+                    Label("Zoom Out", systemImage: "minus.magnifyingglass")
                 }
+                .disabled(!zoom.canZoomOut)
+                Button {
+                    zoomRaw = zoom.zoomedIn.rawValue
+                } label: {
+                    Label("Zoom In", systemImage: "plus.magnifyingglass")
+                }
+                .disabled(!zoom.canZoomIn)
             }
         }
         .overlay { statusOverlay }
