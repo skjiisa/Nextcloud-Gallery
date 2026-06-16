@@ -185,7 +185,7 @@ private struct FlatGalleryGrid: View {
                     Button {
                         // Build the list from the live query so the viewer shows the
                         // photos in the same order — and never captures an empty/stale
-                        // snapshot. The tab holds the presentation (see TabContentView).
+                        // snapshot. The tab holds the presentation (see TabPageView).
                         openPhoto(items.map(PhotoItem.init(cachedItem:)), item.ocId)
                     } label: {
                         PhotoCellView(item: item, contentMode: contentMode, cornerRadius: zoom.cornerRadius)

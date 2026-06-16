@@ -91,7 +91,7 @@ struct FolderGridView: View {
     private func openViewer(at item: CachedItem) {
         // Hand the viewer the live photo list (built here, never empty) so it can
         // page across the folder. The presentation itself lives on the tab — set
-        // in `TabContentView` — so the open photo survives switching tabs.
+        // in `TabPageView` — so the open photo survives switching tabs.
         tab.openViewer(
             photos: items.filter { !$0.isDirectory }.map(PhotoItem.init(cachedItem:)),
             initialID: item.ocId

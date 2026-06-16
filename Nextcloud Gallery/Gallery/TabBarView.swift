@@ -2,9 +2,10 @@
 //  TabBarView.swift
 //  Nextcloud Gallery
 //
-//  The persistent bottom chrome for the tabbed gallery: open a new tab, jump to
-//  the switcher, reach Settings — and swipe sideways to flip between tabs. Hosted
-//  as a bottom safe-area inset so it stays put across a tab's drill-downs.
+//  One tab's bottom chrome: open a new tab, jump to the switcher, reach Settings.
+//  Each tab owns its own bar (they ride along in the carousel), and dragging a bar
+//  sideways drives the carousel between tabs — so you drag this tab's bar away and
+//  the neighbour's bar slides in behind it.
 //
 
 import SwiftUI
@@ -12,12 +13,9 @@ import SwiftUI
 struct TabBarView: View {
     @Environment(TabsModel.self) private var tabs
     @Environment(AppEnvironment.self) private var environment
-
-    /// Opens the Settings sheet, owned by the container.
-    let onShowSettings: () -> Void
-
-    /// Horizontal travel before a bar swipe commits to the previous/next tab.
-    private let swipeThreshold: CGFloat = 60
+    @Environment(CarouselDrag.self) private var drag
+    /// The tab this bar belongs to — names the bar and is the page that slides.
+    @Environment(BrowseTab.self) private var tab
 
     private var isWarming: Bool {
         environment.warmingCoordinator?.state == .warming
@@ -43,7 +41,7 @@ struct TabBarView: View {
                     if isWarming {
                         ProgressView().controlSize(.small)
                     }
-                    Text(tabs.activeTab.title)
+                    Text(tab.title)
                         .font(.subheadline.weight(.medium))
                         .lineLimit(1)
                     tabCountBadge
@@ -57,7 +55,9 @@ struct TabBarView: View {
 
             Spacer(minLength: 0)
 
-            Button(action: onShowSettings) {
+            Button {
+                tabs.isShowingSettings = true
+            } label: {
                 Image(systemName: "gearshape")
                     .font(.title3)
                     .frame(width: 44, height: 44)
@@ -68,17 +68,18 @@ struct TabBarView: View {
         .glassEffect(.regular, in: .capsule)
         .padding(.horizontal, 12)
         .padding(.bottom, 4)
-        // Swipe the bar left/right to move between adjacent tabs (Safari-style),
-        // which never fights the back-swipe or the grids' vertical scrolling.
-        // High-priority so a horizontal drag beats the center button's tap; a
-        // plain tap (no movement) still falls through to the buttons.
+        // Drag the bar to carousel between tabs. High-priority so a horizontal
+        // drag beats the buttons' taps; a tap (no movement) still hits the buttons.
+        //
+        // Measured in GLOBAL space on purpose: the bar itself rides the carousel's
+        // `offset`, so a local-space translation would be polluted by the bar's own
+        // movement — feeding back into the offset and oscillating between two
+        // positions every frame. Global space is the fixed screen, so translation
+        // is pure finger movement.
         .highPriorityGesture(
-            DragGesture(minimumDistance: 20)
-                .onEnded { value in
-                    guard abs(value.translation.width) > abs(value.translation.height),
-                          abs(value.translation.width) > swipeThreshold else { return }
-                    tabs.selectRelative(value.translation.width < 0 ? 1 : -1)
-                }
+            DragGesture(minimumDistance: 12, coordinateSpace: .global)
+                .onChanged { drag.changed($0.translation.width) }
+                .onEnded { drag.ended($0.translation.width) }
         )
     }
 

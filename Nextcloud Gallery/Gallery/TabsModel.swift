@@ -19,6 +19,10 @@ final class TabsModel {
 
     /// Whether the full-screen tab switcher is showing.
     var isShowingSwitcher = false
+    /// Whether the Settings sheet is showing. Lives here so each tab's bar can
+    /// open it without the carousel threading a closure through every page (which
+    /// would defeat the per-frame render skipping that keeps swiping smooth).
+    var isShowingSettings = false
 
     private static let storageKey = "openTabs.v1"
 
@@ -54,7 +58,6 @@ final class TabsModel {
     /// Opens a fresh tab at the Files root and makes it active.
     @discardableResult
     func newTab() -> BrowseTab {
-        captureActiveSnapshot()
         let tab = BrowseTab()
         tabs.append(tab)
         activeTabID = tab.id
@@ -96,30 +99,21 @@ final class TabsModel {
 
     func select(_ id: BrowseTab.ID) {
         guard id != activeTabID, tabs.contains(where: { $0.id == id }) else { return }
-        captureActiveSnapshot()
         activeTabID = id
-        save()
-    }
-
-    /// Switches to the tab `offset` positions away (e.g. -1 / +1 for the bottom
-    /// bar's swipe-between-tabs gesture), clamped to the ends.
-    func selectRelative(_ offset: Int) {
-        let target = activeIndex + offset
-        guard tabs.indices.contains(target), target != activeIndex else { return }
-        captureActiveSnapshot()
-        activeTabID = tabs[target].id
         save()
     }
 
     /// Opens the switcher, first refreshing the live tab's card so it shows what
     /// the user was just looking at.
     func openSwitcher() {
-        captureActiveSnapshot()
+        snapshotActiveTab()
         isShowingSwitcher = true
     }
 
-    /// Grabs a thumbnail of the on-screen (live) tab for its switcher card.
-    private func captureActiveSnapshot() {
+    /// Grabs a thumbnail of the on-screen (live) tab for its switcher card. Call
+    /// while the active tab is full-screen (switcher open, or a carousel drag
+    /// starting) — never once another surface has covered it.
+    func snapshotActiveTab() {
         activeTab.snapshot = WindowSnapshot.capture()
     }
 
