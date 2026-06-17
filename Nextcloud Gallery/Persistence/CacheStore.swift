@@ -66,7 +66,7 @@ actor CacheStore {
             modelContext.insert(state)
         }
 
-        try modelContext.save()
+        try saveAndNotify()
     }
 
     /// Upserts image results from a recursive media SEARCH (which span many
@@ -87,7 +87,7 @@ actor CacheStore {
             }
             changed = true
         }
-        if changed { try modelContext.save() }
+        if changed { try saveAndNotify() }
     }
 
     /// One-shot reconciliation for a flattened gallery's recursive media search:
@@ -149,7 +149,7 @@ actor CacheStore {
             removed += 1
         }
         guard removed > 0 else { return 0 }
-        try modelContext.save()
+        try saveAndNotify()
 
         // Refresh covers for every folder that lost a photo (and its ancestors), so
         // a deleted cover tile is replaced rather than left as a broken thumbnail.
@@ -169,12 +169,63 @@ actor CacheStore {
         for state in try modelContext.fetch(FetchDescriptor<FolderState>()) {
             modelContext.delete(state)
         }
-        try modelContext.save()
+        try saveAndNotify()
     }
 
     /// Whether the given folder has ever been successfully listed.
     func isListed(path: String, account: String) throws -> Bool {
         try folderState(path: WebDAVPath.normalized(path), account: account)?.listState == .listed
+    }
+
+    // MARK: - Saving + change signal
+
+    /// Saves pending changes and broadcasts the set of folder paths whose direct
+    /// children changed, so the visible grids re-fetch (see ``CacheChange``). The
+    /// affected parents are read *before* the save clears the context's pending
+    /// sets. Folder-only changes (crawl state) touch no ``CachedItem`` and so post
+    /// nothing — grids don't depend on them.
+    private func saveAndNotify() throws {
+        guard modelContext.hasChanges else { return }
+        var parents = Set<String>()
+        let touched = modelContext.insertedModelsArray
+            + modelContext.changedModelsArray
+            + modelContext.deletedModelsArray
+        for model in touched {
+            if let item = model as? CachedItem { parents.insert(item.parentPath) }
+        }
+        try modelContext.save()
+        CacheChange.post(parents: parents)
+    }
+
+    // MARK: - Grid snapshots (UIKit reads, off-main)
+
+    /// The folders + photos directly inside a folder, as Sendable snapshots in the
+    /// grid's display order. Mirrors the old `FolderGridView` query.
+    func folderItems(parentPath: String, account: String) throws -> [GridItemSnapshot] {
+        let parent = WebDAVPath.normalized(parentPath)
+        let descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate {
+                $0.parentPath == parent && $0.account == account
+                    && ($0.isDirectory || $0.classFile == "image")
+            },
+            sortBy: [SortDescriptor(\.kindRank), SortDescriptor(\.nameKey)]
+        )
+        return try modelContext.fetch(descriptor).map(GridItemSnapshot.init(item:))
+    }
+
+    /// Every image under a folder's subtree, as Sendable snapshots ordered by the
+    /// given sort. Mirrors the old `FlatGalleryGrid` query.
+    func flatItems(under folderPath: String, account: String, sort: GallerySortOrder) throws -> [GridItemSnapshot] {
+        let base = WebDAVPath.normalized(folderPath)
+        let prefix = base + "/"
+        let descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate {
+                $0.account == account && $0.classFile == "image"
+                    && ($0.parentPath == base || $0.parentPath.starts(with: prefix))
+            },
+            sortBy: sort.sortDescriptors
+        )
+        return try modelContext.fetch(descriptor).map(GridItemSnapshot.init(item:))
     }
 
     // MARK: - Warming crawl
@@ -184,7 +235,7 @@ actor CacheStore {
         let root = WebDAVPath.normalized(path)
         guard try folderState(path: root, account: account) == nil else { return }
         modelContext.insert(FolderState(folderPath: root, account: account, listState: .pending, depth: 0))
-        try modelContext.save()
+        try saveAndNotify()
     }
 
     /// Resets any folders left `.claimed` (e.g. by a crash) back to `.pending`.
@@ -196,7 +247,7 @@ actor CacheStore {
         let claimed = try modelContext.fetch(descriptor)
         guard !claimed.isEmpty else { return }
         for folder in claimed { folder.listState = .pending }
-        try modelContext.save()
+        try saveAndNotify()
     }
 
     /// Atomically claims the next folder to crawl, biasing toward `root` — the
@@ -241,7 +292,7 @@ actor CacheStore {
     /// Marks a fetched folder as claimed and returns its Sendable snapshot.
     private func claim(_ folder: FolderState) throws -> FolderDTO {
         folder.listState = .claimed
-        try modelContext.save()
+        try saveAndNotify()
         return FolderDTO(path: folder.folderPath, depth: folder.depth, etag: folder.etag)
     }
 
@@ -288,7 +339,7 @@ actor CacheStore {
 
     private func markThumbnailsClaimed(_ folder: FolderState) throws -> FolderDTO {
         folder.thumbnailsReady = true
-        try modelContext.save()
+        try saveAndNotify()
         return FolderDTO(path: folder.folderPath, depth: folder.depth, etag: folder.etag)
     }
 
@@ -312,7 +363,7 @@ actor CacheStore {
     func markPending(path: String, account: String) throws {
         guard let folder = try folderState(path: WebDAVPath.normalized(path), account: account) else { return }
         folder.listState = .pending
-        try modelContext.save()
+        try saveAndNotify()
     }
 
     /// Total number of known folders for an account (0 means nothing crawled yet).
@@ -351,7 +402,7 @@ actor CacheStore {
             item.coverTiles = state.coverTiles
             changed = true
         }
-        if changed { try modelContext.save() }
+        if changed { try saveAndNotify() }
     }
 
     // MARK: - 2x2 covers
@@ -372,7 +423,7 @@ actor CacheStore {
             guard let parent = parentPath(of: current, notAbove: root) else { break }
             current = parent
         }
-        if changed { try modelContext.save() }
+        if changed { try saveAndNotify() }
     }
 
     /// Picks up to 4 representative tiles for a folder, preferring spread across

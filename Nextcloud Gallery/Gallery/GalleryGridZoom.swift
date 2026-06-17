@@ -5,7 +5,7 @@
 //  Discrete zoom levels for the flattened gallery grid, cycled from the nav bar.
 //
 
-import SwiftUI
+import Foundation
 
 /// How densely the flattened gallery packs its photos. Lower levels show more,
 /// smaller tiles; higher levels show fewer, larger ones — the nav-bar button

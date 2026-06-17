@@ -2,59 +2,112 @@
 //  ThumbnailImageView.swift
 //  Nextcloud Gallery
 //
-//  Loads and displays a single cached thumbnail, with a placeholder and crossfade.
+//  A UIImageView that loads a cached thumbnail through ``ImageLoader``, showing a
+//  placeholder until it arrives and crossfading it in. Cancels its in-flight load
+//  on reuse so fast scrolling never applies a stale image to a recycled cell.
 //
 
-import SwiftUI
+import UIKit
 
-/// Renders a thumbnail for a cached photo. Fetches via ``ThumbnailStore``,
-/// downsamples off the main actor, and crossfades the result in. Re-loads if the
-/// item's etag changes.
-struct ThumbnailImageView: View {
-    let ocId: String
-    let fileId: String
-    let etag: String
-    let pixels: Int
+final class ThumbnailImageView: UIView {
+    private let imageView = UIImageView()
+    private let placeholderGlyph = UIImageView(image: UIImage(systemName: "photo"))
 
-    @Environment(AppEnvironment.self) private var environment
-    @State private var image: Image?
+    private var loadTask: Task<Void, Never>?
+    private var currentKeyID: String?
 
-    var body: some View {
-        Group {
-            if let image {
-                image.resizable().scaledToFill()
-            } else {
-                Rectangle()
-                    .fill(.quaternary)
-                    .overlay {
-                        Image(systemName: "photo")
-                            .font(.title3)
-                            .foregroundStyle(.tertiary)
-                    }
-            }
+    var imageContentMode: UIView.ContentMode {
+        get { imageView.contentMode }
+        set { imageView.contentMode = newValue }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .quaternarySystemFill
+        clipsToBounds = true
+
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+
+        placeholderGlyph.tintColor = .tertiaryLabel
+        placeholderGlyph.contentMode = .scaleAspectFit
+        placeholderGlyph.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(placeholderGlyph)
+
+        NSLayoutConstraint.activate([
+            imageView.topAnchor.constraint(equalTo: topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            imageView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            placeholderGlyph.centerXAnchor.constraint(equalTo: centerXAnchor),
+            placeholderGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
+            placeholderGlyph.widthAnchor.constraint(equalToConstant: 28),
+            placeholderGlyph.heightAnchor.constraint(equalToConstant: 28),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Loads the thumbnail for the given item at `pixels`. Instant if it's already
+    /// decoded in memory; otherwise shows the placeholder and crossfades on arrival.
+    func load(ocId: String, fileId: String, etag: String, pixels: Int, store: ThumbnailStore, client: NextcloudClient) {
+        let key = ThumbKey(ocId: ocId, etag: etag, pixels: pixels)
+        if currentKeyID == key.id, imageView.image != nil { return }
+        cancel()
+        currentKeyID = key.id
+
+        if let cached = ImageLoader.shared.cachedImage(for: key) {
+            apply(cached, animated: false)
+            return
         }
-        .task(id: ThumbKey(ocId: ocId, etag: etag, pixels: pixels).id) {
-            await load()
+
+        showPlaceholder()
+        loadTask = Task { [weak self] in
+            let image = await ImageLoader.shared.thumbnail(
+                ocId: ocId, fileId: fileId, etag: etag, pixels: pixels, store: store, client: client
+            )
+            guard let self, self.currentKeyID == key.id, let image, !Task.isCancelled else { return }
+            self.apply(image, animated: true)
         }
     }
 
-    private func load() async {
-        guard let client = environment.client else { return }
-        do {
-            let url = try await environment.thumbnailStore.load(
-                ocId: ocId, fileId: fileId, etag: etag, pixels: pixels, client: client
-            )
-            // Decode + downsample off the main actor.
-            let maxPixels = pixels
-            let output = await Task.detached(priority: .utility) {
-                ImageDownsampler.downsample(url: url, maxPixels: maxPixels)
-            }.value
-            guard let output else { return }
-            withAnimation(.easeIn(duration: 0.15)) {
-                image = Image(decorative: output.cgImage, scale: 1)
-            }
-        } catch {
-            // Leave the placeholder in place.
+    /// Resets to an empty quaternary slot (no glyph) — used for blank 2x2 cover cells.
+    func showBlank() {
+        cancel()
+        currentKeyID = nil
+        imageView.image = nil
+        placeholderGlyph.isHidden = true
+    }
+
+    func cancel() {
+        loadTask?.cancel()
+        loadTask = nil
+    }
+
+    /// Called from the owning cell's `prepareForReuse`.
+    func prepareForReuse() {
+        cancel()
+        currentKeyID = nil
+        imageView.image = nil
+        showPlaceholder()
+    }
+
+    private func showPlaceholder() {
+        imageView.image = nil
+        placeholderGlyph.isHidden = false
+    }
+
+    private func apply(_ image: UIImage, animated: Bool) {
+        placeholderGlyph.isHidden = true
+        guard animated else {
+            imageView.image = image
+            return
+        }
+        UIView.transition(with: imageView, duration: 0.15, options: .transitionCrossDissolve) {
+            self.imageView.image = image
         }
     }
 }

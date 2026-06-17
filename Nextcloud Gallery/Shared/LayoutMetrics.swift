@@ -6,32 +6,14 @@
 //  spacing, and readable widths so iPhone, iPad (including resized and
 //  multitasking windows), and visionOS share consistent proportions.
 //
-//  Injected once near the root from the window's horizontal size class (see
-//  `RootView`) and read elsewhere via `@Environment(\.layoutMetrics)`. New
-//  cross-platform features should pull their dimensions from here rather than
-//  hard-coding point values, so they adapt as the canvas grows.
+//  Built from a view's `traitCollection.horizontalSizeClass` (UIKit) and re-derived
+//  whenever a controller's traits change. Pull new cross-platform dimensions from
+//  here rather than hard-coding point values, so they adapt as the canvas grows.
 //
 
-import SwiftUI
-
-struct LayoutMetricsEnvironmentKey: EnvironmentKey {
-    static let defaultValue = LayoutMetrics()
-}
-
-extension EnvironmentValues {
-    /// Size-class-aware layout metrics for the current window.
-    var layoutMetrics: LayoutMetrics {
-        get { self[LayoutMetricsEnvironmentKey.self] }
-        set { self[LayoutMetricsEnvironmentKey.self] = newValue }
-    }
-}
+import UIKit
 
 /// Responsive layout metrics derived from the horizontal size class.
-///
-/// `Equatable` so re-injecting a freshly-built value into the environment never
-/// invalidates descendants (including every grid cell) unless the metrics
-/// actually changed — i.e. only across a compact/regular transition when a
-/// window is resized.
 struct LayoutMetrics: Equatable {
     /// Spacing between major sections (e.g. the sign-in hero and the fields).
     let majorSpacing: CGFloat
@@ -51,12 +33,10 @@ struct LayoutMetrics: Equatable {
     /// on wide iPad / visionOS windows instead of stretching edge to edge.
     let maxReadableWidth: CGFloat?
 
-    /// Corner radius for square grid tiles. Constant across size classes, so it's
-    /// a static constant rather than a per-instance metric — lets lightweight
-    /// cells reference it without reading the environment.
+    /// Corner radius for square grid tiles. Constant across size classes.
     static let tileCornerRadius: CGFloat = 8
 
-    init(sizeClass: UserInterfaceSizeClass? = nil) {
+    init(sizeClass: UIUserInterfaceSizeClass = .unspecified) {
         if sizeClass == .regular {
             // iPad (full / half-screen), visionOS, and other roomy canvases.
             majorSpacing = 32
@@ -76,5 +56,10 @@ struct LayoutMetrics: Equatable {
             largeIconSize = 64
             maxReadableWidth = nil
         }
+    }
+
+    /// Convenience: metrics for a view's current traits.
+    init(traits: UITraitCollection) {
+        self.init(sizeClass: traits.horizontalSizeClass)
     }
 }
