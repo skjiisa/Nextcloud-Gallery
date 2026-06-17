@@ -3,9 +3,10 @@
 //  Nextcloud Gallery
 //
 //  One tab's page: a navigation controller rooted at the Files-root folder grid,
-//  with the tab's own Liquid Glass bottom bar floating above the content. Owns the
-//  tab's navigation history (kept in sync with ``BrowseTab/path`` for restore + the
-//  switcher title) and acts as the ``GalleryNavigator`` for the grids it hosts.
+//  with the tab's Liquid Glass bottom bar floating above the content. Uses the
+//  normal navigation stack (the standard top-bar back button); the bottom bar holds
+//  the reach-friendly actions (zoom, gallery toggle, new tab, settings) and the tab
+//  switcher handle. Keeps ``BrowseTab/path`` in sync for restore + the switcher.
 //
 
 import UIKit
@@ -26,7 +27,6 @@ final class BrowseNavController: UINavigationController {
 
     private let bar = GlassTabBar()
     private var barObservation: ObservationToken?
-    private var syncingFromPath = false
 
     init(tab: BrowseTab, environment: AppEnvironment, client: NextcloudClient, tabsModel: TabsModel, dragHandler: CarouselDragHandling?) {
         self.browseTab = tab
@@ -55,9 +55,12 @@ final class BrowseNavController: UINavigationController {
 
     private func setUpBar() {
         bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.onZoomOut = { [weak self] in guard let self else { return }; browseTab.zoom = browseTab.zoom.zoomedOut }
+        bar.onZoomIn = { [weak self] in guard let self else { return }; browseTab.zoom = browseTab.zoom.zoomedIn }
+        bar.onGalleryToggle = { [weak self] in self?.toggleGallery() }
         bar.onNewTab = { [weak self] in self?.tabsModel.newTab() }
-        bar.onShowTabs = { [weak self] in self?.tabsModel.openSwitcher() }
         bar.onSettings = { [weak self] in self?.tabsModel.isShowingSettings = true }
+        bar.onShowTabs = { [weak self] in self?.tabsModel.openSwitcher() }
         bar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
         bar.onDragEnded = { [weak self] tx in self?.dragHandler?.carouselDragEnded(translation: tx) }
         view.addSubview(bar)
@@ -68,42 +71,93 @@ final class BrowseNavController: UINavigationController {
             bar.heightAnchor.constraint(equalToConstant: GlassTabBar.preferredHeight),
         ])
 
-        barObservation = observeChanges { [weak self] in
-            guard let self else { return }
-            let warming = self.environment.warmingCoordinator?.state == .warming
-            self.bar.configure(title: self.browseTab.title, count: self.tabsModel.tabs.count, isWarming: warming)
-        }
+        barObservation = observeChanges { [weak self] in self?.updateBarState() }
+    }
+
+    /// Refreshes the bar from current navigation + tab state. Reads observable state
+    /// (title, count, warming, zoom) so the observation re-fires on their change, and
+    /// is also called on navigation events for the non-observable stack state.
+    private func updateBarState() {
+        let warming = environment.warmingCoordinator?.state == .warming
+        let galleryEnabled = (topViewController as? FolderGridViewController)?.hasSubfolders ?? false
+        bar.configure(
+            title: browseTab.title,
+            count: tabsModel.tabs.count,
+            isWarming: warming,
+            galleryEnabled: galleryEnabled,
+            canZoomIn: browseTab.zoom.canZoomIn,
+            canZoomOut: browseTab.zoom.canZoomOut
+        )
     }
 
     // MARK: - Destinations
 
     private func makeViewController(forRoot: Bool, route: BrowseRoute?) -> UIViewController {
         if forRoot {
-            return FolderGridViewController(
-                folderPath: client.filesRootPath, title: "Photos", account: client.credentials.account,
-                environment: environment, client: client, navigator: self
-            )
+            return makeFolderGrid(folderPath: client.filesRootPath, title: "Photos", account: client.credentials.account)
         }
         switch route! {
         case .folder(let r):
-            return FolderGridViewController(folderPath: r.folderPath, title: r.title, account: r.account, environment: environment, client: client, navigator: self)
+            return makeFolderGrid(folderPath: r.folderPath, title: r.title, account: r.account)
         case .flat(let r):
             return FlatGalleryViewController(folderPath: r.folderPath, title: r.title, account: r.account, environment: environment, client: client, tab: browseTab, navigator: self)
         }
     }
 
-    private func push(_ route: BrowseRoute) {
+    private func makeFolderGrid(folderPath: String, title: String, account: String) -> FolderGridViewController {
+        let grid = FolderGridViewController(folderPath: folderPath, title: title, account: account, environment: environment, client: client, tab: browseTab, navigator: self)
+        // Subfolders may appear after a load → refresh the Gallery toggle state.
+        grid.onContentChanged = { [weak self, weak grid] in
+            guard let self, self.topViewController === grid else { return }
+            self.updateBarState()
+        }
+        return grid
+    }
+
+    // MARK: - Navigation
+
+    private func navigate(to route: BrowseRoute) {
         browseTab.path.append(route)
         tabsModel.save()
         pushViewController(makeViewController(forRoot: false, route: route), animated: true)
+    }
+
+    /// Flattens the current folder into the gallery (only meaningful when a browse
+    /// grid with subfolders is showing — the bar disables the button otherwise).
+    private func toggleGallery() {
+        guard topViewController is FolderGridViewController else { return }
+        let (path, title, account): (String, String, String)
+        if let last = browseTab.path.last, case .folder(let r) = last {
+            (path, title, account) = (r.folderPath, r.title, r.account)
+        } else {
+            (path, title, account) = (client.filesRootPath, "Photos", client.credentials.account)
+        }
+        navigate(to: .flat(FlatGalleryRoute(folderPath: path, title: title, account: account)))
+    }
+
+    /// Whether the cached structure says a folder has no subfolders (so it should
+    /// open straight into the flattened gallery). Unknown structure → browse.
+    private func isLeafFolder(_ route: FolderRoute) async -> Bool {
+        let store = environment.cacheStore
+        guard (try? await store.isListed(path: route.folderPath, account: route.account)) == true else { return false }
+        let hasSub = (try? await store.hasSubfolders(folderPath: route.folderPath, account: route.account)) ?? true
+        return !hasSub
     }
 }
 
 // MARK: - GalleryNavigator
 
 extension BrowseNavController: GalleryNavigator {
-    func openFolder(_ route: FolderRoute) { push(.folder(route)) }
-    func openFlatGallery(_ route: FlatGalleryRoute) { push(.flat(route)) }
+    func openFolder(_ route: FolderRoute) {
+        Task {
+            if await isLeafFolder(route) {
+                navigate(to: .flat(FlatGalleryRoute(folderPath: route.folderPath, title: route.title, account: route.account)))
+            } else {
+                navigate(to: .folder(route))
+            }
+        }
+    }
+
     func openFolderInNewTab(_ route: FolderRoute) { tabsModel.open(.folder(route), inNewTab: true) }
     func openViewer(photos: [PhotoItem], initialID: String) { browseTab.openViewer(photos: photos, initialID: initialID) }
 }
@@ -111,16 +165,19 @@ extension BrowseNavController: GalleryNavigator {
 // MARK: - UINavigationControllerDelegate
 
 extension BrowseNavController: UINavigationControllerDelegate {
-    func navigationController(_ navigationController: UINavigationController, didShow viewController: UIViewController, animated: Bool) {
+    func navigationController(_ navigationController: UINavigationController, willShow viewController: UIViewController, animated: Bool) {
         // Keep content clear of the floating bar.
         viewController.additionalSafeAreaInsets.bottom = GlassTabBar.preferredHeight + 4
+    }
 
-        // A pop (back button / swipe) leaves fewer VCs than path entries — truncate
-        // the path to match so it persists and the switcher title is correct.
+    func navigationController(_ navigationController: UINavigationController, didShow viewController: UIViewController, animated: Bool) {
+        // A pop (back button / edge-swipe) leaves fewer VCs than path entries — trim
+        // the path so it persists and the switcher title is correct.
         let depth = viewControllers.count - 1
         if depth < browseTab.path.count {
             browseTab.path = Array(browseTab.path.prefix(depth))
             tabsModel.save()
         }
+        updateBarState()
     }
 }

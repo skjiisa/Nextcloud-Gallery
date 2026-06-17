@@ -39,8 +39,6 @@ final class FlatGalleryViewController: UIViewController {
 
     private var sortItem: UIBarButtonItem!
     private var aspectItem: UIBarButtonItem!
-    private var zoomOutItem: UIBarButtonItem!
-    private var zoomInItem: UIBarButtonItem!
 
     /// Tight, Photos-style inter-tile gap and outer margin.
     private let tileSpacing: CGFloat = 2
@@ -142,11 +140,11 @@ final class FlatGalleryViewController: UIViewController {
     }
 
     private func setUpToolbar() {
+        // Zoom moved to the bottom bar (it now drives folder grids too); the top bar
+        // keeps the flat-gallery-only controls: sort + fit/fill.
         aspectItem = UIBarButtonItem(image: nil, style: .plain, target: self, action: #selector(toggleAspect))
-        zoomOutItem = UIBarButtonItem(image: UIImage(systemName: "minus.magnifyingglass"), style: .plain, target: self, action: #selector(zoomOut))
-        zoomInItem = UIBarButtonItem(image: UIImage(systemName: "plus.magnifyingglass"), style: .plain, target: self, action: #selector(zoomIn))
         sortItem = UIBarButtonItem(image: UIImage(systemName: "arrow.up.arrow.down"), menu: makeSortMenu())
-        navigationItem.rightBarButtonItems = [zoomInItem, zoomOutItem, aspectItem, sortItem]
+        navigationItem.rightBarButtonItems = [aspectItem, sortItem]
         updateToolbar()
     }
 
@@ -162,8 +160,6 @@ final class FlatGalleryViewController: UIViewController {
     private func updateToolbar() {
         sortItem.menu = makeSortMenu()
         aspectItem.image = UIImage(systemName: browseTab.aspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-        zoomOutItem.isEnabled = browseTab.zoom.canZoomOut
-        zoomInItem.isEnabled = browseTab.zoom.canZoomIn
     }
 
     // MARK: - Observation
@@ -265,8 +261,6 @@ final class FlatGalleryViewController: UIViewController {
     // MARK: - Actions
 
     @objc private func toggleAspect() { browseTab.aspectFill.toggle() }
-    @objc private func zoomOut() { browseTab.zoom = browseTab.zoom.zoomedOut }
-    @objc private func zoomIn() { browseTab.zoom = browseTab.zoom.zoomedIn }
     @objc private func pullToRefresh() { Task { await load() } }
 }
 

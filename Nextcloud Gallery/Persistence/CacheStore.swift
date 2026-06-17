@@ -213,6 +213,17 @@ actor CacheStore {
         return try modelContext.fetch(descriptor).map(GridItemSnapshot.init(item:))
     }
 
+    /// Whether a folder has any subfolder in the cache (used to decide whether to
+    /// open it as a browsable grid or jump straight to the flattened gallery).
+    func hasSubfolders(folderPath: String, account: String) throws -> Bool {
+        let parent = WebDAVPath.normalized(folderPath)
+        var descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate { $0.parentPath == parent && $0.account == account && $0.isDirectory }
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetchCount(descriptor) > 0
+    }
+
     /// Every image under a folder's subtree, as Sendable snapshots ordered by the
     /// given sort. Mirrors the old `FlatGalleryGrid` query.
     func flatItems(under folderPath: String, account: String, sort: GallerySortOrder) throws -> [GridItemSnapshot] {
