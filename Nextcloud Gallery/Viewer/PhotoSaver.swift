@@ -5,7 +5,7 @@
 //  Saves a photo to the user's iOS photo library (add-only).
 //
 
-import SwiftUI
+import Foundation
 import Photos
 import Observation
 

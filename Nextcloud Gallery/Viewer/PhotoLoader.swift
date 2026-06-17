@@ -5,7 +5,7 @@
 //  Progressive image loading for the viewer: cached thumb → preview → full file.
 //
 
-import SwiftUI
+import UIKit
 import Observation
 
 /// Loads the displayed image for one photo in stages so something appears

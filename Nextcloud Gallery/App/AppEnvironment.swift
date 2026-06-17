@@ -6,7 +6,7 @@
 //  and the warming coordinator.
 //
 
-import SwiftUI
+import Foundation
 import SwiftData
 import Observation
 
@@ -75,6 +75,7 @@ final class AppEnvironment {
         try? await cacheStore.clearAll()
         await thumbnailStore.clear()
         await fullImageStore.clear()
+        ImageLoader.shared.clearMemory()
 
         reconcileWarming()
     }

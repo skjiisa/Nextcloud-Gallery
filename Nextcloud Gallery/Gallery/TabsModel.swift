@@ -7,7 +7,8 @@
 //  it's restored on next launch.
 //
 
-import SwiftUI
+import UIKit
+import Observation
 
 /// Manages the open ``BrowseTab``s for the signed-in session. There's always at
 /// least one tab and exactly one active tab.

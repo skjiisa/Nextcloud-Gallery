@@ -7,7 +7,8 @@
 //  tabs swaps which `BrowseTab` is live (see ``TabsModel`` / ``TabbedGalleryView``).
 //
 
-import SwiftUI
+import UIKit
+import Observation
 
 /// A photo opened full-screen within a tab. Held on the tab (not as transient
 /// view `@State`) so the open photo survives switching away and back — one tab

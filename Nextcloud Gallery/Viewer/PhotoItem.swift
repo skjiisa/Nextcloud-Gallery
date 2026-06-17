@@ -19,6 +19,14 @@ nonisolated struct PhotoItem: Identifiable, Hashable, Sendable {
 
     var id: String { ocId }
 
+    init(ocId: String, fileId: String, etag: String, fileName: String, serverPath: String) {
+        self.ocId = ocId
+        self.fileId = fileId
+        self.etag = etag
+        self.fileName = fileName
+        self.serverPath = serverPath
+    }
+
     init(cachedItem: CachedItem) {
         ocId = cachedItem.ocId
         fileId = cachedItem.fileId
