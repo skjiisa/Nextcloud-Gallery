@@ -185,13 +185,17 @@ final class FlatGalleryViewController: UIViewController {
 
         updateToolbar()
         if sortChanged { reloadFromCache() }
-        if zoomChanged { collectionView.setCollectionViewLayout(makeLayout(), animated: true) }
-        if zoomChanged || aspectChanged {
-            // Animate the appearance change on visible cells; off-screen cells pick
-            // up the new appearance from `configure` when they're next dequeued.
-            for case let cell as PhotoGridCell in collectionView.visibleCells {
-                cell.applyAppearance(fill: aspectFill, cornerRadius: zoom.cornerRadius, animated: true)
-            }
+        guard zoomChanged || aspectChanged else { return }
+
+        // One bouncy spring drives the whole change: the column/size change (zoom)
+        // and each visible cell's photo-rect resize (fit/fill) animate together.
+        // Off-screen cells pick up the new appearance from `configure` on dequeue.
+        let newLayout = zoomChanged ? makeLayout() : nil
+        let cells = collectionView.visibleCells.compactMap { $0 as? PhotoGridCell }
+        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.3, options: [.allowUserInteraction]) {
+            if let newLayout { self.collectionView.setCollectionViewLayout(newLayout, animated: false) }
+            for cell in cells { cell.applyAppearance(fill: aspectFill, cornerRadius: zoom.cornerRadius) }
+            self.collectionView.layoutIfNeeded()
         }
     }
 

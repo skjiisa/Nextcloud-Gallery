@@ -11,7 +11,9 @@ import Foundation
 /// smaller tiles; higher levels show fewer, larger ones — the nav-bar button
 /// cycles through them. Add a case (and a branch below) to introduce a level.
 nonisolated enum GalleryGridZoom: Int, CaseIterable, Identifiable, Codable, Sendable {
-    case dense = 0   // most columns, smallest photos
+    case xsmall = 0  // most columns, smallest photos
+    case small
+    case regular
     case medium
     case large
     case single      // one big photo per row
@@ -19,12 +21,16 @@ nonisolated enum GalleryGridZoom: Int, CaseIterable, Identifiable, Codable, Send
     var id: Int { rawValue }
 
     /// Multiplier on the size class's base `minGridCellSize`, so the column count
-    /// stays responsive across iPhone/iPad while honoring the chosen density.
+    /// stays responsive across iPhone/iPad while honoring the chosen density. The
+    /// gaps are tuned so each step changes the phone column count by ~1 (≈6→5→4→3→
+    /// 2→1) instead of skipping levels.
     var cellSizeMultiplier: CGFloat {
         switch self {
-        case .dense: 0.6
+        case .xsmall: 0.6
+        case .small: 0.72
+        case .regular: 0.88
         case .medium: 1.0
-        case .large: 1.7
+        case .large: 1.45
         case .single: 3.0
         }
     }
@@ -33,10 +39,12 @@ nonisolated enum GalleryGridZoom: Int, CaseIterable, Identifiable, Codable, Send
     /// tight on small tiles, a touch rounder on large ones.
     var cornerRadius: CGFloat {
         switch self {
-        case .dense: 2
-        case .medium: 4
-        case .large: 7
-        case .single: 10
+        case .xsmall: 2
+        case .small: 3
+        case .regular: 4
+        case .medium: 5
+        case .large: 8
+        case .single: 12
         }
     }
 

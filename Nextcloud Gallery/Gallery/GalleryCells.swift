@@ -54,7 +54,7 @@ final class PhotoGridCell: UICollectionViewCell {
         client: NextcloudClient
     ) {
         photoAspect = item.aspectRatio
-        applyAppearance(fill: fill, cornerRadius: cornerRadius, animated: false)
+        applyAppearance(fill: fill, cornerRadius: cornerRadius)
         thumbnail.load(
             ocId: item.ocId, fileId: item.fileId, etag: item.etag,
             pixels: NextcloudConfig.gridThumbnailPixels, store: store, client: client
@@ -62,8 +62,10 @@ final class PhotoGridCell: UICollectionViewCell {
     }
 
     /// Sizes the photo rect — square for fill, the photo's aspect fitted within the
-    /// square for fit — and sets its corner radius. Animated when toggled live.
-    func applyAppearance(fill: Bool, cornerRadius: CGFloat, animated: Bool) {
+    /// square for fit — and sets its corner radius. The size change comes from the
+    /// swapped constraints; wrap a call in a `UIView` spring animation (with a
+    /// `layoutIfNeeded`) to make a live fit/fill or zoom change bounce.
+    func applyAppearance(fill: Bool, cornerRadius: CGFloat) {
         let wMult: CGFloat, hMult: CGFloat
         if fill {
             (wMult, hMult) = (1, 1)
@@ -82,21 +84,8 @@ final class PhotoGridCell: UICollectionViewCell {
         // Fit mode (whole photo, Photos-style) rounds a touch more than fill.
         let radius = fill ? cornerRadius : cornerRadius * 1.5
         thumbnail.layer.cornerCurve = .continuous
+        thumbnail.layer.cornerRadius = radius
         thumbnail.hoverStyle = UIHoverStyle(effect: .highlight, shape: .rect(cornerRadius: radius))
-
-        if animated {
-            let cornerAnim = CABasicAnimation(keyPath: "cornerRadius")
-            cornerAnim.fromValue = thumbnail.layer.cornerRadius
-            cornerAnim.toValue = radius
-            cornerAnim.duration = 0.35
-            thumbnail.layer.add(cornerAnim, forKey: "cornerRadius")
-            thumbnail.layer.cornerRadius = radius
-            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0) {
-                self.contentView.layoutIfNeeded()
-            }
-        } else {
-            thumbnail.layer.cornerRadius = radius
-        }
     }
 
     override func prepareForReuse() {
