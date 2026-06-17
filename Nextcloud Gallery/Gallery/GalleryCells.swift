@@ -13,20 +13,33 @@ import UIKit
 // MARK: - Photo cell
 
 /// A single square photo tile backed by a cached grid thumbnail.
+///
+/// Fill mode: the photo fills the square slot (cropped). Fit mode: the thumbnail
+/// view shrinks to the photo's own aspect ratio within the square so the whole
+/// photo shows — and because the rounded corners live on *that* view (the photo's
+/// display rect, not the square slot), they clip the photo itself at any aspect
+/// ratio. Toggling fit/fill animates the resize.
 final class PhotoGridCell: UICollectionViewCell {
     static let reuseID = "PhotoGridCell"
 
     private let thumbnail = ThumbnailImageView()
+    private var widthConstraint: NSLayoutConstraint!
+    private var heightConstraint: NSLayoutConstraint!
+    private var photoAspect: CGFloat = 1
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         thumbnail.translatesAutoresizingMaskIntoConstraints = false
+        thumbnail.imageContentMode = .scaleAspectFill
         contentView.addSubview(thumbnail)
+        // Photo rect, centered; its size relative to the square slot is what fit/fill
+        // changes (see `applyAppearance`). Starts filling the slot.
+        widthConstraint = thumbnail.widthAnchor.constraint(equalTo: contentView.widthAnchor)
+        heightConstraint = thumbnail.heightAnchor.constraint(equalTo: contentView.heightAnchor)
         NSLayoutConstraint.activate([
-            thumbnail.topAnchor.constraint(equalTo: contentView.topAnchor),
-            thumbnail.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            thumbnail.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            thumbnail.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            thumbnail.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            thumbnail.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            widthConstraint, heightConstraint,
         ])
     }
 
@@ -35,22 +48,55 @@ final class PhotoGridCell: UICollectionViewCell {
 
     func configure(
         with item: GridItemSnapshot,
-        contentMode: UIView.ContentMode,
+        fill: Bool,
         cornerRadius: CGFloat,
         store: ThumbnailStore,
         client: NextcloudClient
     ) {
-        thumbnail.imageContentMode = contentMode
-        // Fit mode (whole photo, Photos-style) rounds a touch more than fill.
-        thumbnail.layer.cornerRadius = contentMode == .scaleAspectFit ? cornerRadius * 1.5 : cornerRadius
-        thumbnail.layer.cornerCurve = .continuous
-        thumbnail.backgroundColor = contentMode == .scaleAspectFit ? .clear : .quaternarySystemFill
-        GalleryTile.applyHoverStyle(to: self, cornerRadius: thumbnail.layer.cornerRadius)
-
+        photoAspect = item.aspectRatio
+        applyAppearance(fill: fill, cornerRadius: cornerRadius, animated: false)
         thumbnail.load(
             ocId: item.ocId, fileId: item.fileId, etag: item.etag,
             pixels: NextcloudConfig.gridThumbnailPixels, store: store, client: client
         )
+    }
+
+    /// Sizes the photo rect — square for fill, the photo's aspect fitted within the
+    /// square for fit — and sets its corner radius. Animated when toggled live.
+    func applyAppearance(fill: Bool, cornerRadius: CGFloat, animated: Bool) {
+        let wMult: CGFloat, hMult: CGFloat
+        if fill {
+            (wMult, hMult) = (1, 1)
+        } else if photoAspect >= 1 {
+            (wMult, hMult) = (1, 1 / photoAspect) // landscape: full width, shorter height
+        } else {
+            (wMult, hMult) = (photoAspect, 1)     // portrait: full height, narrower width
+        }
+
+        // A constraint's multiplier is immutable, so swap the width/height constraints.
+        NSLayoutConstraint.deactivate([widthConstraint, heightConstraint])
+        widthConstraint = thumbnail.widthAnchor.constraint(equalTo: contentView.widthAnchor, multiplier: wMult)
+        heightConstraint = thumbnail.heightAnchor.constraint(equalTo: contentView.heightAnchor, multiplier: hMult)
+        NSLayoutConstraint.activate([widthConstraint, heightConstraint])
+
+        // Fit mode (whole photo, Photos-style) rounds a touch more than fill.
+        let radius = fill ? cornerRadius : cornerRadius * 1.5
+        thumbnail.layer.cornerCurve = .continuous
+        thumbnail.hoverStyle = UIHoverStyle(effect: .highlight, shape: .rect(cornerRadius: radius))
+
+        if animated {
+            let cornerAnim = CABasicAnimation(keyPath: "cornerRadius")
+            cornerAnim.fromValue = thumbnail.layer.cornerRadius
+            cornerAnim.toValue = radius
+            cornerAnim.duration = 0.35
+            thumbnail.layer.add(cornerAnim, forKey: "cornerRadius")
+            thumbnail.layer.cornerRadius = radius
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0) {
+                self.contentView.layoutIfNeeded()
+            }
+        } else {
+            thumbnail.layer.cornerRadius = radius
+        }
     }
 
     override func prepareForReuse() {

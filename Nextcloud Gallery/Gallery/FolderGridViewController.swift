@@ -116,7 +116,7 @@ final class FolderGridViewController: UIViewController {
     private func configureDataSource() {
         let photoCell = UICollectionView.CellRegistration<PhotoGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }
-            cell.configure(with: item, contentMode: .scaleAspectFill, cornerRadius: LayoutMetrics.tileCornerRadius, store: self.thumbnailStore, client: self.client)
+            cell.configure(with: item, fill: true, cornerRadius: LayoutMetrics.tileCornerRadius, store: self.thumbnailStore, client: self.client)
         }
         let folderCell = UICollectionView.CellRegistration<FolderGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }

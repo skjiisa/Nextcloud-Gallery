@@ -134,8 +134,7 @@ final class FlatGalleryViewController: UIViewController {
     private func configureDataSource() {
         let photoCell = UICollectionView.CellRegistration<PhotoGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }
-            let mode: UIView.ContentMode = self.browseTab.aspectFill ? .scaleAspectFill : .scaleAspectFit
-            cell.configure(with: item, contentMode: mode, cornerRadius: self.browseTab.zoom.cornerRadius, store: self.thumbnailStore, client: self.client)
+            cell.configure(with: item, fill: self.browseTab.aspectFill, cornerRadius: self.browseTab.zoom.cornerRadius, store: self.thumbnailStore, client: self.client)
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { collectionView, indexPath, item in
             collectionView.dequeueConfiguredReusableCell(using: photoCell, for: indexPath, item: item)
@@ -187,11 +186,11 @@ final class FlatGalleryViewController: UIViewController {
         updateToolbar()
         if sortChanged { reloadFromCache() }
         if zoomChanged { collectionView.setCollectionViewLayout(makeLayout(), animated: true) }
-        if (zoomChanged || aspectChanged), dataSource != nil {
-            var snapshot = dataSource.snapshot()
-            if !snapshot.itemIdentifiers.isEmpty {
-                snapshot.reconfigureItems(snapshot.itemIdentifiers)
-                dataSource.apply(snapshot, animatingDifferences: true)
+        if zoomChanged || aspectChanged {
+            // Animate the appearance change on visible cells; off-screen cells pick
+            // up the new appearance from `configure` when they're next dequeued.
+            for case let cell as PhotoGridCell in collectionView.visibleCells {
+                cell.applyAppearance(fill: aspectFill, cornerRadius: zoom.cornerRadius, animated: true)
             }
         }
     }
