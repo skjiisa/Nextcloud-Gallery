@@ -21,6 +21,10 @@ final class ThumbnailImageView: UIView {
         set { imageView.contentMode = newValue }
     }
 
+    /// The thumbnail currently shown, if loaded. Read by the viewer's open
+    /// transition to seed its hero image from the tapped tile.
+    var image: UIImage? { imageView.image }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .quaternarySystemFill

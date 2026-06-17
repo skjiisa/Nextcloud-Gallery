@@ -45,6 +45,11 @@ final class BrowseTab: Identifiable {
     /// a cold launch restores the browse stack but not an open viewer.
     var viewer: ViewerPresentation?
 
+    /// The grid that opened the viewer, supplying the tapped tile's geometry for the
+    /// grow-open / shrink-close transition. Weak + observation-ignored: purely
+    /// transient, and a fade is used if the grid is gone.
+    @ObservationIgnored weak var viewerSource: (any PhotoViewerTransitionSource)?
+
     /// Last rendered snapshot of this tab, shown as its card in the switcher.
     /// In-memory only; restored tabs fall back to a placeholder until first shown.
     var snapshot: UIImage?
@@ -69,8 +74,10 @@ final class BrowseTab: Identifiable {
         path.last?.title ?? "Photos"
     }
 
-    /// Opens `photo` full-screen, paging across `photos`.
-    func openViewer(photos: [PhotoItem], initialID: String) {
+    /// Opens `photo` full-screen, paging across `photos`. `source` is the grid that
+    /// opened it, used for the grow/shrink transition.
+    func openViewer(photos: [PhotoItem], initialID: String, source: (any PhotoViewerTransitionSource)? = nil) {
+        viewerSource = source
         viewer = ViewerPresentation(photos: photos, initialID: initialID)
     }
 }

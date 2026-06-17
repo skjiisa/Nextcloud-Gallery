@@ -33,16 +33,33 @@ final class PhotoPageViewController: UIViewController {
 
     deinit { loadTask?.cancel() }
 
+    /// The best image currently shown (thumb → preview → full). Seeds the viewer's
+    /// close transition so it shrinks the crispest image available.
+    var displayedImage: UIImage? { scrollView.image }
+
+    /// On-screen rect of the displayed photo in `view`'s coordinates (honors
+    /// zoom/pan), or nil before the first image loads.
+    func displayedImageRect(in view: UIView) -> CGRect? { scrollView.displayedImageRect(in: view) }
+
+    /// Whether the photo is zoomed past its fitted size (gates swipe-to-dismiss).
+    var isZoomed: Bool { scrollView.isZoomedIn }
+
+    /// This page's double-tap-to-zoom recognizer, so the viewer's chrome-toggle tap
+    /// can require it to fail.
+    var zoomDoubleTap: UITapGestureRecognizer { scrollView.doubleTap }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .black
+        // Clear so the viewer's theme-matched backdrop shows through (and so the
+        // grid shows through during the grow-open / swipe-dismiss transitions).
+        view.backgroundColor = .clear
 
         scrollView.frame = view.bounds
         scrollView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         scrollView.onZoomChanged = { [weak self] zoomed in self?.onZoomChanged?(zoomed) }
         view.addSubview(scrollView)
 
-        spinner.color = .white
+        spinner.color = .secondaryLabel
         spinner.translatesAutoresizingMaskIntoConstraints = false
         spinner.startAnimating()
         view.addSubview(spinner)

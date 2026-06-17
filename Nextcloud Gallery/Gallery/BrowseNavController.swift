@@ -105,7 +105,9 @@ extension BrowseNavController: GalleryNavigator {
     func openFolder(_ route: FolderRoute) { push(.folder(route)) }
     func openFlatGallery(_ route: FlatGalleryRoute) { push(.flat(route)) }
     func openFolderInNewTab(_ route: FolderRoute) { tabsModel.open(.folder(route), inNewTab: true) }
-    func openViewer(photos: [PhotoItem], initialID: String) { browseTab.openViewer(photos: photos, initialID: initialID) }
+    func openViewer(photos: [PhotoItem], initialID: String, source: (any PhotoViewerTransitionSource)?) {
+        browseTab.openViewer(photos: photos, initialID: initialID, source: source)
+    }
 }
 
 // MARK: - UINavigationControllerDelegate

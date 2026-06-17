@@ -16,6 +16,10 @@ final class ZoomableImageScrollView: UIScrollView, UIScrollViewDelegate {
     /// Reports whether the view is zoomed in, so the pager can disable paging.
     var onZoomChanged: ((Bool) -> Void)?
 
+    /// The double-tap-to-zoom recognizer, exposed so the viewer's single-tap
+    /// (toggle chrome) can require it to fail.
+    let doubleTap = UITapGestureRecognizer()
+
     private var lastBoundsSize: CGSize = .zero
 
     var image: UIImage? {
@@ -40,13 +44,35 @@ final class ZoomableImageScrollView: UIScrollView, UIScrollViewDelegate {
         imageView.contentMode = .scaleAspectFit
         addSubview(imageView)
 
-        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+        doubleTap.addTarget(self, action: #selector(handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         addGestureRecognizer(doubleTap)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Whether the photo is zoomed past its fitted size. The viewer reads this to
+    /// gate swipe-to-dismiss (a downward pan pans the zoomed photo instead).
+    var isZoomedIn: Bool { zoomScale > minimumZoomScale + 0.001 }
+
+    /// The on-screen rect of the displayed image pixels — the aspect-fit rect within
+    /// the image view, honoring the current zoom and pan — in `view`'s coordinate
+    /// space. Nil if no image yet. The hero transition uses this to line the photo
+    /// up exactly with where it sits on screen.
+    func displayedImageRect(in view: UIView) -> CGRect? {
+        guard let image = imageView.image, image.size.width > 0, image.size.height > 0 else { return nil }
+        let boundsSize = imageView.bounds.size
+        guard boundsSize.width > 0, boundsSize.height > 0 else { return nil }
+        let scale = min(boundsSize.width / image.size.width, boundsSize.height / image.size.height)
+        let fitted = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let rectInImageView = CGRect(
+            x: (boundsSize.width - fitted.width) / 2,
+            y: (boundsSize.height - fitted.height) / 2,
+            width: fitted.width, height: fitted.height
+        )
+        return imageView.convert(rectInImageView, to: view)
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()

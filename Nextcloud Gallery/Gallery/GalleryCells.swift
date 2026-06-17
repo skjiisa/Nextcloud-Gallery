@@ -46,6 +46,14 @@ final class PhotoGridCell: UICollectionViewCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// The thumbnail currently shown (seeds the viewer's grow-open transition).
+    var displayedImage: UIImage? { thumbnail.image }
+
+    /// The view holding the visible photo. Its frame is the photo's on-screen rect
+    /// within the cell — which, in fit mode, is smaller than the square slot — so the
+    /// open/close transition lines up with what the user sees.
+    var photoView: UIView { thumbnail }
+
     func configure(
         with item: GridItemSnapshot,
         fill: Bool,

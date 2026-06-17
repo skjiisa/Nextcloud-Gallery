@@ -18,6 +18,8 @@ protocol GalleryNavigator: AnyObject {
     func openFlatGallery(_ route: FlatGalleryRoute)
     /// Open a folder in a new background tab and switch to it ("Open in New Tab").
     func openFolderInNewTab(_ route: FolderRoute)
-    /// Present the full-screen viewer for `photos`, starting at `initialID`.
-    func openViewer(photos: [PhotoItem], initialID: String)
+    /// Present the full-screen viewer for `photos`, starting at `initialID`. `source`
+    /// supplies the tapped tile's geometry for the grow-open / shrink-close
+    /// transition (held weakly; a fade is used if it's gone).
+    func openViewer(photos: [PhotoItem], initialID: String, source: (any PhotoViewerTransitionSource)?)
 }

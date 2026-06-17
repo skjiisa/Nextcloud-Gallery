@@ -214,7 +214,7 @@ extension FolderGridViewController: UICollectionViewDelegate, UICollectionViewDa
             navigator?.openFolder(FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account))
         } else {
             let photos = items.filter { !$0.isDirectory }.map(PhotoItem.init(snapshot:))
-            navigator?.openViewer(photos: photos, initialID: item.ocId)
+            navigator?.openViewer(photos: photos, initialID: item.ocId, source: self)
         }
     }
 
@@ -240,5 +240,17 @@ extension FolderGridViewController: UICollectionViewDelegate, UICollectionViewDa
                 ImageLoader.shared.prefetch(ocId: item.ocId, fileId: item.fileId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels, store: thumbnailStore, client: client)
             }
         }
+    }
+}
+
+// MARK: - Viewer transition source
+
+extension FolderGridViewController: PhotoViewerTransitionSource {
+    func viewerSourceFrame(forPhotoID id: String, in space: UICoordinateSpace) -> CGRect? {
+        GridTransitionSource.sourceFrame(forPhotoID: id, in: space, collectionView: collectionView, items: items)
+    }
+
+    func viewerSourceImage(forPhotoID id: String) -> UIImage? {
+        GridTransitionSource.sourceImage(forPhotoID: id, collectionView: collectionView, items: items)
     }
 }
