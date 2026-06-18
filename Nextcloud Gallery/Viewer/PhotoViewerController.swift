@@ -201,6 +201,7 @@ final class PhotoViewerController: UIViewController {
         page.onZoomChanged = { [weak self] zoomed in
             self?.pagingScrollView?.isScrollEnabled = !zoomed
         }
+        page.onImageChanged = { [weak self] image in self?.onCurrentImageUpgrade?(image) }
         return page
     }
 
@@ -272,6 +273,9 @@ final class PhotoViewerController: UIViewController {
         switch pan.state {
         case .began:
             guard let transitionController else { return }
+            // Freeze horizontal paging so a diagonal (down-and-sideways) drag is a
+            // pure dismissal and can't also page to a neighbour mid-gesture.
+            pagingScrollView?.isScrollEnabled = false
             transitionController.isInteractive = true
             thresholdHapticFired = false
             dismissHaptic.prepare()
@@ -289,12 +293,14 @@ final class PhotoViewerController: UIViewController {
             }
 
         case .ended, .cancelled, .failed:
+            // Re-enable paging (a cancelled drag returns to the normal pager).
+            pagingScrollView?.isScrollEnabled = true
             let translation = pan.translation(in: view)
             let velocity = pan.velocity(in: view)
             let shouldDismiss = translation.y > 0 && (translation.y > dismissThreshold || velocity.y > 1000)
             transitionController?.isInteractive = false
             if shouldDismiss {
-                transitionController?.activeDriver?.finish()
+                transitionController?.activeDriver?.finish(velocity: velocity)
             } else {
                 fadeChrome(hidden: chromeHiddenBeforeDrag)
                 transitionController?.activeDriver?.cancel()
@@ -306,6 +312,10 @@ final class PhotoViewerController: UIViewController {
     }
 
     // MARK: - Transition hooks
+
+    /// Set by the open animator to receive the current page's sharper image stages
+    /// (preview → full) so the grow hero can upgrade from the grid thumbnail.
+    var onCurrentImageUpgrade: ((UIImage) -> Void)?
 
     var currentPhotoID: String { currentPhoto?.id ?? viewerID }
     var currentPhotoItem: PhotoItem? { currentPhoto }
@@ -335,6 +345,14 @@ final class PhotoViewerController: UIViewController {
 
     func setPageContentHidden(_ hidden: Bool) {
         pageController.view.isHidden = hidden
+    }
+
+    /// Inserts the transition hero just above the photo and beneath all chrome, so a
+    /// tall photo grows/shrinks *behind* the bars and filmstrip instead of over them.
+    /// The viewer's view fills the transition container, so frames computed in the
+    /// container's space map 1:1 into here.
+    func insertTransitionHero(_ heroView: UIView) {
+        view.insertSubview(heroView, aboveSubview: pageController.view)
     }
 
     /// Called by the dismiss paths once the viewer is actually gone, exactly once.

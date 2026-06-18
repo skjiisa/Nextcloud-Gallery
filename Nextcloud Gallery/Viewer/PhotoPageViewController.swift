@@ -19,6 +19,11 @@ final class PhotoPageViewController: UIViewController {
     /// Forwarded zoom state, so the pager can disable horizontal paging while zoomed.
     var onZoomChanged: ((Bool) -> Void)?
 
+    /// Fired whenever a sharper image stage loads (thumb → preview → full), so the
+    /// open transition's hero can upgrade from the grid thumbnail mid-grow instead of
+    /// staying soft (most visible on tall portraits).
+    var onImageChanged: ((UIImage) -> Void)?
+
     private var loaderObservation: ObservationToken?
     private var loadTask: Task<Void, Never>?
 
@@ -90,5 +95,6 @@ final class PhotoPageViewController: UIViewController {
         } else {
             scrollView.image = image
         }
+        onImageChanged?(image)
     }
 }

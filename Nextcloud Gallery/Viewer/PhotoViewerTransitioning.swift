@@ -27,6 +27,9 @@ protocol PhotoViewerTransitionSource: AnyObject {
     func viewerSourceFrame(forPhotoID id: String, in space: UICoordinateSpace) -> CGRect?
     /// The thumbnail currently shown in that tile, to seed the hero image on open.
     func viewerSourceImage(forPhotoID id: String) -> UIImage?
+    /// Hides/shows the tile's photo while the hero stands in for it, so the grid
+    /// doesn't show a second copy of the image mid-animation.
+    func setViewerSourceHidden(_ hidden: Bool, forPhotoID id: String)
 }
 
 // MARK: - Controller (transitioning delegate)
@@ -122,7 +125,7 @@ final class PhotoViewerHeroAnimator: NSObject, UIViewControllerAnimatedTransitio
 
         let id = viewer.currentPhotoID
         let heroImage = source?.viewerSourceImage(forPhotoID: id) ?? viewer.currentDisplayedImage
-        let sourceFrame = source?.viewerSourceFrame(forPhotoID: id, in: container)
+        let sourceFrame = source?.viewerSourceFrame(forPhotoID: id, in: viewerView)
         let aspect = heroImage.map { $0.size.height > 0 ? $0.size.width / $0.size.height : 1 } ?? viewer.currentAspectRatio
         let endFrame = viewer.fittedRect(forAspectRatio: aspect)
         let duration = transitionDuration(using: context)
@@ -142,10 +145,15 @@ final class PhotoViewerHeroAnimator: NSObject, UIViewControllerAnimatedTransitio
         }
 
         viewer.setPageContentHidden(true)
+        source?.setViewerSourceHidden(true, forPhotoID: id)
         let hero = PhotoHero.makeHeroView(image: heroImage)
         hero.frame = sourceFrame
         hero.layer.cornerRadius = PhotoHero.tileCornerRadius
-        container.addSubview(hero)
+        viewer.insertTransitionHero(hero)
+
+        // Sharpen the hero in place as the page's loader yields preview/full stages,
+        // so a tall portrait doesn't stay soft for the whole grow.
+        viewer.onCurrentImageUpgrade = { [weak hero] image in hero?.image = image }
 
         UIView.animate(withDuration: duration, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0, options: [.curveEaseOut]) {
             hero.frame = endFrame
@@ -153,21 +161,22 @@ final class PhotoViewerHeroAnimator: NSObject, UIViewControllerAnimatedTransitio
             viewer.backdropView.alpha = 1
             viewer.setChromeAlpha(1)
         } completion: { _ in
+            viewer.onCurrentImageUpgrade = nil
             hero.removeFromSuperview()
             viewer.setPageContentHidden(false)
+            self.source?.setViewerSourceHidden(false, forPhotoID: id)
             context.completeTransition(!context.transitionWasCancelled)
         }
     }
 
     private func animateDismiss(_ context: UIViewControllerContextTransitioning) {
-        let container = context.containerView
         guard let viewer = context.viewController(forKey: .from) as? PhotoViewerController else {
             context.completeTransition(false); return
         }
         let id = viewer.currentPhotoID
         let heroImage = viewer.currentDisplayedImage ?? source?.viewerSourceImage(forPhotoID: id)
         let startFrame = viewer.currentImageOnScreenRect ?? viewer.fittedRect(forAspectRatio: viewer.currentAspectRatio)
-        let destFrame = source?.viewerSourceFrame(forPhotoID: id, in: container)
+        let destFrame = source?.viewerSourceFrame(forPhotoID: id, in: viewer.view)
         let duration = transitionDuration(using: context)
 
         guard let heroImage else {
@@ -178,9 +187,10 @@ final class PhotoViewerHeroAnimator: NSObject, UIViewControllerAnimatedTransitio
         }
 
         viewer.setPageContentHidden(true)
+        source?.setViewerSourceHidden(true, forPhotoID: id)
         let hero = PhotoHero.makeHeroView(image: heroImage)
         hero.frame = startFrame
-        container.addSubview(hero)
+        viewer.insertTransitionHero(hero)
 
         UIView.animate(withDuration: duration, delay: 0, options: [.curveEaseInOut]) {
             if let destFrame {
@@ -195,6 +205,7 @@ final class PhotoViewerHeroAnimator: NSObject, UIViewControllerAnimatedTransitio
             viewer.setChromeAlpha(0)
         } completion: { _ in
             hero.removeFromSuperview()
+            self.source?.setViewerSourceHidden(false, forPhotoID: id)
             context.completeTransition(!context.transitionWasCancelled)
         }
     }
@@ -217,6 +228,16 @@ final class PhotoViewerInteractiveDismiss: NSObject, UIViewControllerInteractive
     private let hero = UIImageView()
     private var startFrame: CGRect = .zero
     private var didStart = false
+    /// The photo being dismissed, captured once at gesture start. Used for both the
+    /// hide and the matching unhide so they can't target different tiles if the
+    /// current photo shifts mid-gesture.
+    private var photoID = ""
+
+    /// A finish/cancel that arrived before `startInteractiveTransition` set us up
+    /// (possible when a very fast flick's gesture events land in one batch). Applied
+    /// as soon as the transition actually starts, so the dismissal never gets stuck.
+    private enum PendingEnd { case finish(CGPoint), cancel }
+    private var pendingEnd: PendingEnd?
 
     init(source: (any PhotoViewerTransitionSource)?) {
         self.source = source
@@ -224,24 +245,34 @@ final class PhotoViewerInteractiveDismiss: NSObject, UIViewControllerInteractive
 
     func startInteractiveTransition(_ transitionContext: UIViewControllerContextTransitioning) {
         context = transitionContext
-        let container = transitionContext.containerView
         guard let viewer = transitionContext.viewController(forKey: .from) as? PhotoViewerController else {
             transitionContext.completeTransition(false); onComplete?(); return
         }
         self.viewer = viewer
+        photoID = viewer.currentPhotoID
 
         startFrame = viewer.currentImageOnScreenRect ?? viewer.fittedRect(forAspectRatio: viewer.currentAspectRatio)
-        let image = viewer.currentDisplayedImage ?? source?.viewerSourceImage(forPhotoID: viewer.currentPhotoID)
+        let image = viewer.currentDisplayedImage ?? source?.viewerSourceImage(forPhotoID: photoID)
 
         hero.image = image
         hero.contentMode = .scaleAspectFill
         hero.clipsToBounds = true
         hero.layer.cornerCurve = .continuous
         hero.frame = startFrame
-        container.addSubview(hero)
+        viewer.insertTransitionHero(hero)
 
         viewer.setPageContentHidden(true)
+        source?.setViewerSourceHidden(true, forPhotoID: photoID)
         didStart = true
+
+        // If the gesture already ended before we got here, apply it now.
+        if let pending = pendingEnd {
+            pendingEnd = nil
+            switch pending {
+            case .finish(let velocity): finish(velocity: velocity)
+            case .cancel: cancel()
+            }
+        }
     }
 
     /// `progress` in 0...1 (drag distance toward the dismiss point); `translation` in
@@ -257,12 +288,23 @@ final class PhotoViewerInteractiveDismiss: NSObject, UIViewControllerInteractive
     }
 
     /// Commit: land the hero in the current photo's tile (or fade it away) and tear
-    /// the viewer down.
-    func finish() {
-        guard didStart, let context, let viewer else { onComplete?(); return }
-        let destFrame = source?.viewerSourceFrame(forPhotoID: viewer.currentPhotoID, in: context.containerView)
+    /// the viewer down. `velocity` is the gesture's release velocity (points/sec),
+    /// carried into the spring so the throw continues naturally.
+    func finish(velocity: CGPoint = .zero) {
+        guard didStart else { pendingEnd = .finish(velocity); return }
+        guard let context, let viewer else { onComplete?(); return }
+        let destFrame = source?.viewerSourceFrame(forPhotoID: photoID, in: viewer.view)
+        // Re-hide in case computing the frame just scrolled the tile on-screen.
+        source?.setViewerSourceHidden(true, forPhotoID: photoID)
 
-        UIView.animate(withDuration: 0.28, delay: 0, options: [.curveEaseInOut]) {
+        // Convert the finger's points/sec into the spring's distance-fraction/sec,
+        // capped low so a hard flick continues the throw without shooting way past
+        // the cell and snapping back. A slow drag is already well under the cap, so
+        // its (well-liked) settle is unchanged.
+        let distance = destFrame.map { abs($0.midY - hero.frame.midY) } ?? 1
+        let springVelocity = min(1.5, abs(velocity.y) / max(1, distance))
+
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: springVelocity, options: [.curveEaseOut, .allowUserInteraction]) {
             if let destFrame {
                 self.hero.frame = destFrame
                 self.hero.layer.cornerRadius = PhotoHero.tileCornerRadius
@@ -275,6 +317,7 @@ final class PhotoViewerInteractiveDismiss: NSObject, UIViewControllerInteractive
             viewer.backdropView.alpha = 0
         } completion: { _ in
             self.hero.removeFromSuperview()
+            self.source?.setViewerSourceHidden(false, forPhotoID: self.photoID)
             context.finishInteractiveTransition()
             context.completeTransition(true)
             viewer.handleDidDismiss()
@@ -285,7 +328,8 @@ final class PhotoViewerInteractiveDismiss: NSObject, UIViewControllerInteractive
     /// Abort: spring the hero back to full-screen, restore the backdrop, and keep the
     /// viewer presented.
     func cancel() {
-        guard didStart, let context, let viewer else { onComplete?(); return }
+        guard didStart else { pendingEnd = .cancel; return }
+        guard let context, let viewer else { onComplete?(); return }
         UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.3, options: [.curveEaseOut]) {
             self.hero.frame = self.startFrame
             self.hero.layer.cornerRadius = 0
@@ -294,6 +338,7 @@ final class PhotoViewerInteractiveDismiss: NSObject, UIViewControllerInteractive
             self.hero.removeFromSuperview()
             viewer.setPageContentHidden(false)
             viewer.setChromeHidden(false)
+            self.source?.setViewerSourceHidden(false, forPhotoID: self.photoID)
             context.cancelInteractiveTransition()
             context.completeTransition(false)
             self.onComplete?()

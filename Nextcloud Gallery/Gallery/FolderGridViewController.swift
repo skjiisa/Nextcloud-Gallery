@@ -253,4 +253,8 @@ extension FolderGridViewController: PhotoViewerTransitionSource {
     func viewerSourceImage(forPhotoID id: String) -> UIImage? {
         GridTransitionSource.sourceImage(forPhotoID: id, collectionView: collectionView, items: items)
     }
+
+    func setViewerSourceHidden(_ hidden: Bool, forPhotoID id: String) {
+        GridTransitionSource.setHidden(hidden, forPhotoID: id, collectionView: collectionView, items: items)
+    }
 }

@@ -42,6 +42,17 @@ enum GridTransitionSource {
         return cell.displayedImage
     }
 
+    /// Hides/shows the photo in the tile for `id` while the hero stands in for it
+    /// (no-op if the tile isn't currently realized).
+    static func setHidden(
+        _ hidden: Bool, forPhotoID id: String,
+        collectionView: UICollectionView, items: [GridItemSnapshot]
+    ) {
+        guard let indexPath = indexPath(forPhotoID: id, items: items),
+              let cell = collectionView.cellForItem(at: indexPath) as? PhotoGridCell else { return }
+        cell.setPhotoHidden(hidden)
+    }
+
     /// Index path of the tile for `id`. Items are a single section appended in order,
     /// so the array index is the row (folders included — lookup is by `ocId`).
     private static func indexPath(forPhotoID id: String, items: [GridItemSnapshot]) -> IndexPath? {

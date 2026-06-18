@@ -54,6 +54,10 @@ final class PhotoGridCell: UICollectionViewCell {
     /// open/close transition lines up with what the user sees.
     var photoView: UIView { thumbnail }
 
+    /// Hides/shows the tile's photo while the viewer's hero stands in for it, so the
+    /// grid doesn't show a duplicate of the image mid-transition.
+    func setPhotoHidden(_ hidden: Bool) { thumbnail.isHidden = hidden }
+
     func configure(
         with item: GridItemSnapshot,
         fill: Bool,
@@ -98,6 +102,7 @@ final class PhotoGridCell: UICollectionViewCell {
 
     override func prepareForReuse() {
         super.prepareForReuse()
+        thumbnail.isHidden = false
         thumbnail.prepareForReuse()
     }
 }
