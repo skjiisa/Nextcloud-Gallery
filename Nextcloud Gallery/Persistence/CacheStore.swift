@@ -25,7 +25,21 @@ actor CacheStore {
         var byOcId: [String: CachedItem] = [:]
         for item in existing { byOcId[item.ocId] = item }
 
-        let parentDepth = try folderState(path: parent, account: account)?.depth ?? 0
+        // Fetch the parent's state once, up front — refetching it after the inserts
+        // below would re-scan them in memory (see the batch lookup note).
+        let parentState = try folderState(path: parent, account: account)
+        let parentDepth = parentState?.depth ?? 0
+
+        // Load, in one query, every child ``FolderState`` this listing might create or
+        // prune, keyed by path. The per-directory existence check then hits this map
+        // instead of fetching inside the loop — where, with the single save deferred
+        // to the end, each fetch re-evaluates its predicate *in Swift* against the
+        // growing set of unsaved inserts. That made a folder with N subfolders O(N²)
+        // and was the multi-second warming hang on large folders.
+        let childDirPaths = files.filter(\.directory)
+            .map { WebDAVPath.normalized($0.serverUrl + "/" + $0.fileName) }
+        let existingDirPaths = existing.filter(\.isDirectory).map(\.fullPath)
+        var statesByPath = try folderStatesByPath(Array(Set(childDirPaths + existingDirPaths)), account: account)
 
         var seen = Set<String>()
         for file in files {
@@ -38,27 +52,29 @@ actor CacheStore {
                 modelContext.insert(CachedItem(file: file, parentPath: parent, fullPath: fullPath, account: account))
             }
 
-            if file.directory, try folderState(path: fullPath, account: account) == nil {
-                modelContext.insert(FolderState(
+            if file.directory, statesByPath[fullPath] == nil {
+                let state = FolderState(
                     folderPath: fullPath,
                     account: account,
                     etag: file.etag,
                     listState: .pending,
                     depth: parentDepth + 1
-                ))
+                )
+                modelContext.insert(state)
+                statesByPath[fullPath] = state
             }
         }
 
         // Prune items that disappeared from the folder.
         for item in existing where !seen.contains(item.ocId) {
-            if item.isDirectory, let state = try folderState(path: item.fullPath, account: account) {
+            if item.isDirectory, let state = statesByPath[item.fullPath] {
                 modelContext.delete(state)
             }
             modelContext.delete(item)
         }
 
         // Mark the parent folder listed (creating its state if this is the root).
-        if let parentState = try folderState(path: parent, account: account) {
+        if let parentState {
             parentState.listState = .listed
             parentState.lastListed = Date()
         } else {
@@ -75,19 +91,24 @@ actor CacheStore {
     /// Leaves ``FolderState`` and covers untouched — warming still owns the folder
     /// structure; this only ensures the flattened gallery's photos are present.
     func ingestSearchResults(files: [NKFile], account: String) throws {
-        guard !files.isEmpty else { return }
-        var changed = false
-        for file in files where !file.directory && file.classFile == "image" {
+        let images = files.filter { !$0.directory && $0.classFile == "image" }
+        guard !images.isEmpty else { return }
+        // Resolve all existing rows in one query (see ``ingest`` — a per-file fetch
+        // here would re-scan the loop's unsaved inserts in Swift, making a search of
+        // N images O(N²)).
+        var byOcId = try cachedItemsByOcId(images.map(\.ocId), account: account)
+        for file in images {
             let parentPath = WebDAVPath.normalized(file.serverUrl)
             let fullPath = WebDAVPath.normalized(file.serverUrl + "/" + file.fileName)
-            if let existing = try item(ocId: file.ocId, account: account) {
+            if let existing = byOcId[file.ocId] {
                 existing.apply(file: file, parentPath: parentPath, fullPath: fullPath, account: account)
             } else {
-                modelContext.insert(CachedItem(file: file, parentPath: parentPath, fullPath: fullPath, account: account))
+                let item = CachedItem(file: file, parentPath: parentPath, fullPath: fullPath, account: account)
+                modelContext.insert(item)
+                byOcId[file.ocId] = item
             }
-            changed = true
         }
-        if changed { try saveAndNotify() }
+        try saveAndNotify()
     }
 
     /// One-shot reconciliation for a flattened gallery's recursive media search:
@@ -545,13 +566,17 @@ actor CacheStore {
         return try modelContext.fetch(descriptor)
     }
 
-    /// The cached item with this unique server id, if present.
-    private func item(ocId: String, account: String) throws -> CachedItem? {
-        var descriptor = FetchDescriptor<CachedItem>(
-            predicate: #Predicate { $0.ocId == ocId && $0.account == account }
+    /// The cached items for a set of server ids, keyed by `ocId`, resolved in one
+    /// query. Lets an upsert loop look up existing rows without a per-item fetch
+    /// (which, mid-loop, would re-scan its own unsaved inserts in memory).
+    private func cachedItemsByOcId(_ ocIds: [String], account: String) throws -> [String: CachedItem] {
+        guard !ocIds.isEmpty else { return [:] }
+        let descriptor = FetchDescriptor<CachedItem>(
+            predicate: #Predicate { $0.account == account && ocIds.contains($0.ocId) }
         )
-        descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
+        var map: [String: CachedItem] = [:]
+        for item in try modelContext.fetch(descriptor) { map[item.ocId] = item }
+        return map
     }
 
     private func folderState(path: String, account: String) throws -> FolderState? {
@@ -559,6 +584,18 @@ actor CacheStore {
             predicate: #Predicate { $0.folderPath == path && $0.account == account }
         )
         return try modelContext.fetch(descriptor).first
+    }
+
+    /// The ``FolderState`` rows for a set of folder paths, keyed by `folderPath`,
+    /// resolved in one query (the `FolderState` analogue of ``cachedItemsByOcId``).
+    private func folderStatesByPath(_ paths: [String], account: String) throws -> [String: FolderState] {
+        guard !paths.isEmpty else { return [:] }
+        let descriptor = FetchDescriptor<FolderState>(
+            predicate: #Predicate { $0.account == account && paths.contains($0.folderPath) }
+        )
+        var map: [String: FolderState] = [:]
+        for state in try modelContext.fetch(descriptor) { map[state.folderPath] = state }
+        return map
     }
 
     /// The cached directory row for a folder (keyed by its own `fullPath`). The
