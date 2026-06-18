@@ -24,6 +24,10 @@ final class PhotoViewerController: UIViewController {
     /// nav controller) removes this child viewer and clears ``BrowseTab/viewer``.
     var onClose: (() -> Void)?
 
+    /// Called when the shown photo changes (on open and each page turn) so the host can
+    /// reflect the image's name in the tab's title.
+    var onCurrentPhotoChanged: ((PhotoItem?) -> Void)?
+
     /// The grid the photo grew from — supplies the tile geometry for the grow / shrink
     /// / swipe hero. Weak; owned by the tab's navigation stack.
     weak var source: (any PhotoViewerTransitionSource)?
@@ -102,14 +106,7 @@ final class PhotoViewerController: UIViewController {
             self.updateSaveButton(for: self.saver.status)
             self.presentSaveErrorIfNeeded()
         }
-        barObservation = observeChanges { [weak self] in
-            guard let self else { return }
-            let warming = self.environment.warmingCoordinator?.state == .warming
-            self.tabBar.configure(
-                title: self.tabs.activeTab.title, count: self.tabs.tabs.count, isWarming: warming,
-                galleryEnabled: false, canZoomIn: false, canZoomOut: false
-            )
-        }
+        barObservation = observeChanges { [weak self] in self?.configureTabBar() }
     }
 
     // MARK: - Setup
@@ -251,6 +248,19 @@ final class PhotoViewerController: UIViewController {
 
     private func updateTitle() {
         topItem.title = currentPhoto?.fileName
+        onCurrentPhotoChanged?(currentPhoto)
+        configureTabBar()
+    }
+
+    /// The viewer's tab bar reflects the *current image's* name (not the active tab's
+    /// title), so it reads correctly even while another tab slides in over it, and so
+    /// the tab title follows the open photo. Count + warming come from the model.
+    private func configureTabBar() {
+        let warming = environment.warmingCoordinator?.state == .warming
+        tabBar.configure(
+            title: currentPhoto?.fileName ?? "", count: tabs.tabs.count, isWarming: warming,
+            galleryEnabled: false, canZoomIn: false, canZoomOut: false
+        )
     }
 
     // MARK: - Chrome

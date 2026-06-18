@@ -112,6 +112,10 @@ final class BrowseNavController: UIViewController {
             self?.browseTab.viewer = nil
             self?.browseTab.viewerSource = nil
         }
+        // Reflect the open photo's name in the tab's title (bar pill + switcher).
+        viewer.onCurrentPhotoChanged = { [weak self] photo in
+            self?.browseTab.viewerTitle = photo?.fileName
+        }
         addChild(viewer)
         viewer.view.frame = view.bounds
         viewer.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -125,6 +129,7 @@ final class BrowseNavController: UIViewController {
     private func removePhotoViewer() {
         guard let viewer = photoViewer else { return }
         photoViewer = nil
+        browseTab.viewerTitle = nil   // revert the tab title to the folder name
         viewer.willMove(toParent: nil)
         viewer.view.removeFromSuperview()
         viewer.removeFromParent()

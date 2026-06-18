@@ -45,6 +45,11 @@ final class BrowseTab: Identifiable {
     /// a cold launch restores the browse stack but not an open viewer.
     var viewer: ViewerPresentation?
 
+    /// While a photo is open, the current image's file name — it becomes the tab's
+    /// ``title`` (bar pill + switcher card) in place of the folder name. The viewer
+    /// keeps it current as you page; it's cleared when the viewer closes.
+    var viewerTitle: String?
+
     /// The grid that opened the viewer, supplying the tapped tile's geometry for the
     /// grow-open / shrink-close transition. Weak + observation-ignored: purely
     /// transient, and a fade is used if the grid is gone.
@@ -68,10 +73,10 @@ final class BrowseTab: Identifiable {
         self.aspectFill = aspectFill
     }
 
-    /// The tab's label in the switcher: the deepest screen's title, or "Photos"
-    /// at the root.
+    /// The tab's label (bar pill + switcher card): the open photo's name when a photo
+    /// is full-screened, otherwise the deepest screen's title, or "Photos" at the root.
     var title: String {
-        path.last?.title ?? "Photos"
+        viewerTitle ?? path.last?.title ?? "Photos"
     }
 
     /// Opens `photo` full-screen, paging across `photos`. `source` is the grid that
