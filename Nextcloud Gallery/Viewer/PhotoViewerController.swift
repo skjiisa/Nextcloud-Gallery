@@ -50,7 +50,6 @@ final class PhotoViewerController: UIViewController {
     /// The app's bottom tab bar, shown over the viewer (viewer mode: just the tab
     /// pill → switcher, New tab, Settings). Keeps tab context while viewing a photo.
     private let tabBar = GlassTabBar()
-    private let bottomScrim = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
     private var filmstrip: PhotoFilmstripView!
     private var barObservation: ObservationToken?
 
@@ -152,9 +151,6 @@ final class PhotoViewerController: UIViewController {
         topItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(doneTapped))
         topBar.items = [topItem]
 
-        // Frosted bottom region behind the filmstrip + tab bar.
-        bottomScrim.translatesAutoresizingMaskIntoConstraints = false
-
         // The app's tab bar. All buttons stay in place (zoom + gallery are disabled
         // via `configure` since there's no grid here — they don't shift), and all
         // gestures stay live: tap/up-drag the pill → switcher, horizontal drag →
@@ -166,7 +162,6 @@ final class PhotoViewerController: UIViewController {
         tabBar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
         tabBar.onDragEnded = { [weak self] tx in self?.dragHandler?.carouselDragEnded(translation: tx) }
 
-        view.addSubview(bottomScrim)
         view.addSubview(tabBar)
         view.addSubview(topBar)
 
@@ -189,17 +184,15 @@ final class PhotoViewerController: UIViewController {
         )
         filmstrip.translatesAutoresizingMaskIntoConstraints = false
         filmstrip.onIndexChanged = { [weak self] index in self?.goToPage(index, fromFilmstrip: true) }
-        view.insertSubview(filmstrip, aboveSubview: bottomScrim)
+        // No backdrop behind the strip — it sits directly over the photo so a tall
+        // portrait shows through beneath it. Kept below the tab bar in z-order.
+        view.insertSubview(filmstrip, belowSubview: tabBar)
 
         NSLayoutConstraint.activate([
             filmstrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             filmstrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             filmstrip.bottomAnchor.constraint(equalTo: tabBar.topAnchor, constant: -4),
             filmstrip.heightAnchor.constraint(equalToConstant: PhotoFilmstripView.preferredHeight),
-            bottomScrim.topAnchor.constraint(equalTo: filmstrip.topAnchor),
-            bottomScrim.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            bottomScrim.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            bottomScrim.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
     }
 
@@ -266,22 +259,26 @@ final class PhotoViewerController: UIViewController {
         fadeChrome(hidden: !chromeHidden)
     }
 
-    private var chromeViews: [UIView] { [topBar, bottomScrim, filmstrip, tabBar] }
+    /// Viewer-level chrome (the Done/Save bar + filmstrip) — faded by the open / close
+    /// / swipe transitions. The tab bar is deliberately excluded: it's the tab's
+    /// persistent chrome and stays visible over the photo (and through a swipe-to-
+    /// dismiss); only the tap-to-hide toggle hides it (see ``toggleChromeViews``).
+    private var transitionChromeViews: [UIView] { [topBar, filmstrip] }
 
-    /// Sets chrome opacity directly (used inside the transition animation blocks).
+    /// Everything the tap-to-hide toggle shows/hides — includes the tab bar.
+    private var toggleChromeViews: [UIView] { [topBar, filmstrip, tabBar] }
+
+    /// Sets the viewer chrome opacity directly (used inside the transition animation
+    /// blocks). Leaves the tab bar untouched so it stays put over the content.
     func setChromeAlpha(_ alpha: CGFloat) {
-        chromeViews.forEach { $0.alpha = alpha }
-    }
-
-    /// Sets chrome visibility without animation (used to restore after a transition).
-    func setChromeHidden(_ hidden: Bool) {
-        chromeHidden = hidden
-        setChromeAlpha(hidden ? 0 : 1)
+        transitionChromeViews.forEach { $0.alpha = alpha }
     }
 
     private func fadeChrome(hidden: Bool) {
         chromeHidden = hidden
-        UIView.animate(withDuration: 0.25) { self.setChromeAlpha(hidden ? 0 : 1) }
+        UIView.animate(withDuration: 0.25) {
+            self.toggleChromeViews.forEach { $0.alpha = hidden ? 0 : 1 }
+        }
     }
 
     // MARK: - Open / close / swipe (self-driven hero)
@@ -404,7 +401,9 @@ final class PhotoViewerController: UIViewController {
         swipeHero = hero
         setPageContentHidden(true)
         source?.setViewerSourceHidden(true, forPhotoID: swipePhotoID)
-        fadeChrome(hidden: true)
+        // Fade the viewer chrome (Done bar + filmstrip) but keep the tab bar visible —
+        // it stays over the dismissing photo as the tab's persistent chrome.
+        UIView.animate(withDuration: 0.25) { self.setChromeAlpha(0) }
     }
 
     private func updateSwipe(translation: CGPoint) {
