@@ -56,8 +56,7 @@ final class GlassTabBar: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         buildUI()
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan))
-        addGestureRecognizer(pan)
+        addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handlePan)))
         let tap = UITapGestureRecognizer(target: self, action: #selector(pillTapped))
         pill.addGestureRecognizer(tap)
     }

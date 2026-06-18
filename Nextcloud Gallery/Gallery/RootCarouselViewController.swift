@@ -32,12 +32,10 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     private var slot: CGFloat { pageWidth + peekGap }
 
     // Presented modals (driven by the tabs model).
-    private var viewerVC: PhotoViewerController?
     private var switcherVC: TabSwitcherViewController?
     private var settingsVC: UIViewController?
 
     private var structureObservation: ObservationToken?
-    private var viewerObservation: ObservationToken?
     private var switcherObservation: ObservationToken?
     private var settingsObservation: ObservationToken?
 
@@ -77,10 +75,6 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
             _ = self.tabs.tabs.map(\.id)
             _ = self.tabs.activeTabID
             if !self.isDragging { self.rebuildActive() }
-        }
-        viewerObservation = observeChanges { [weak self] in
-            guard let self else { return }
-            self.syncViewer(self.tabs.activeTab.viewer)
         }
         switcherObservation = observeChanges { [weak self] in
             guard let self else { return }
@@ -203,37 +197,6 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
             vc = presented
         }
         return vc
-    }
-
-    private func syncViewer(_ presentation: ViewerPresentation?) {
-        if let presentation, viewerVC?.viewerID != presentation.id {
-            viewerVC?.dismiss(animated: false)
-            let viewer = PhotoViewerController(
-                photos: presentation.photos, initialID: presentation.initialID,
-                environment: environment, tabs: tabs
-            )
-            let openingTab = tabs.activeTab
-
-            // Wire the grow/shrink/swipe transition, carrying the grid that opened it.
-            let transition = PhotoViewerTransitionController()
-            transition.source = openingTab.viewerSource
-            viewer.transitionController = transition
-            viewer.transitioningDelegate = transition
-            viewer.modalPresentationStyle = .overFullScreen
-
-            // Cleared after the viewer actually dismisses (Done or swipe). Drops our
-            // reference first so the resulting `viewer == nil` sync is a no-op.
-            viewer.onDidDismiss = { [weak self, weak openingTab] in
-                self?.viewerVC = nil
-                openingTab?.viewer = nil
-                openingTab?.viewerSource = nil
-            }
-            viewerVC = viewer
-            topmostPresenter().present(viewer, animated: true)
-        } else if presentation == nil, let viewer = viewerVC {
-            viewerVC = nil
-            viewer.dismiss(animated: true)
-        }
     }
 
     private func syncSwitcher(_ show: Bool) {

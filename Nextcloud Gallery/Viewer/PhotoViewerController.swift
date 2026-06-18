@@ -20,15 +20,21 @@ final class PhotoViewerController: UIViewController {
     /// ``ViewerPresentation/id``), so the carousel can tell when to re-present.
     let viewerID: String
 
-    /// Called once the viewer has actually dismissed (tapped Done or swiped away),
-    /// so the host can clear its presentation state.
-    var onDidDismiss: (() -> Void)?
+    /// Called after the close / swipe-away animation finishes, so the host (the tab's
+    /// nav controller) removes this child viewer and clears ``BrowseTab/viewer``.
+    var onClose: (() -> Void)?
 
-    /// The custom present/dismiss/swipe transition. Set by the presenter (it carries
-    /// the grid source); also assigned as the (weak) `transitioningDelegate`, so the
-    /// viewer holds the only strong reference. No retain cycle: the controller keeps
-    /// only weak references back to the viewer and source.
-    var transitionController: PhotoViewerTransitionController?
+    /// Called when the shown photo changes (on open and each page turn) so the host can
+    /// reflect the image's name in the tab's title.
+    var onCurrentPhotoChanged: ((PhotoItem?) -> Void)?
+
+    /// The grid the photo grew from — supplies the tile geometry for the grow / shrink
+    /// / swipe hero. Weak; owned by the tab's navigation stack.
+    weak var source: (any PhotoViewerTransitionSource)?
+
+    /// The carousel, so the bar's horizontal drag can switch tabs while a photo is
+    /// open (set by the host). Weak — the carousel outlives us.
+    weak var dragHandler: CarouselDragHandling?
 
     private let photos: [PhotoItem]
     private let environment: AppEnvironment
@@ -45,9 +51,11 @@ final class PhotoViewerController: UIViewController {
 
     private let topBar = UINavigationBar()
     private let topItem = UINavigationItem()
-    private let bottomBar = UIToolbar()
-    private let bottomScrim = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+    /// The app's bottom tab bar, shown over the viewer (viewer mode: just the tab
+    /// pill → switcher, New tab, Settings). Keeps tab context while viewing a photo.
+    private let tabBar = GlassTabBar()
     private var filmstrip: PhotoFilmstripView!
+    private var barObservation: ObservationToken?
 
     private var chromeTap: UITapGestureRecognizer!
     private var dismissPan: UIPanGestureRecognizer!
@@ -60,7 +68,11 @@ final class PhotoViewerController: UIViewController {
 
     private var saverObservation: ObservationToken?
     private var presentingSaveError = false
-    private var didDismiss = false
+
+    // Interactive swipe-down hero state.
+    private var swipeHero: UIImageView?
+    private var swipeStartFrame: CGRect = .zero
+    private var swipePhotoID = ""
 
     init(photos: [PhotoItem], initialID: String, environment: AppEnvironment, tabs: TabsModel) {
         self.photos = photos
@@ -94,6 +106,7 @@ final class PhotoViewerController: UIViewController {
             self.updateSaveButton(for: self.saver.status)
             self.presentSaveErrorIfNeeded()
         }
+        barObservation = observeChanges { [weak self] in self?.configureTabBar() }
     }
 
     // MARK: - Setup
@@ -135,29 +148,28 @@ final class PhotoViewerController: UIViewController {
         topItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(doneTapped))
         topBar.items = [topItem]
 
-        // Frosted bottom region behind the filmstrip + toolbar.
-        bottomScrim.translatesAutoresizingMaskIntoConstraints = false
+        // The app's tab bar. All buttons stay in place (zoom + gallery are disabled
+        // via `configure` since there's no grid here — they don't shift), and all
+        // gestures stay live: tap/up-drag the pill → switcher, horizontal drag →
+        // carousel, so you can switch tabs with a photo open.
+        tabBar.translatesAutoresizingMaskIntoConstraints = false
+        tabBar.onShowTabs = { [weak self] in self?.tabs.openSwitcher() }
+        tabBar.onNewTab = { [weak self] in self?.tabs.newTab() }
+        tabBar.onSettings = { [weak self] in self?.tabs.isShowingSettings = true }
+        tabBar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
+        tabBar.onDragEnded = { [weak self] tx in self?.dragHandler?.carouselDragEnded(translation: tx) }
 
-        let toolbarAppearance = UIToolbarAppearance()
-        toolbarAppearance.configureWithTransparentBackground()
-        bottomBar.standardAppearance = toolbarAppearance
-        bottomBar.compactAppearance = toolbarAppearance
-        bottomBar.translatesAutoresizingMaskIntoConstraints = false
-        let showTabs = UIBarButtonItem(image: UIImage(systemName: "square.on.square"), style: .plain, target: self, action: #selector(showTabsTapped))
-        showTabs.accessibilityLabel = "Show Tabs"
-        bottomBar.items = [.flexibleSpace(), showTabs, .flexibleSpace()]
-
-        view.addSubview(bottomScrim)
-        view.addSubview(bottomBar)
+        view.addSubview(tabBar)
         view.addSubview(topBar)
 
         NSLayoutConstraint.activate([
             topBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            bottomBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
-            bottomBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            bottomBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tabBar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            tabBar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            tabBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -4),
+            tabBar.heightAnchor.constraint(equalToConstant: GlassTabBar.preferredHeight),
         ])
         updateSaveButton(for: saver.status)
     }
@@ -169,17 +181,15 @@ final class PhotoViewerController: UIViewController {
         )
         filmstrip.translatesAutoresizingMaskIntoConstraints = false
         filmstrip.onIndexChanged = { [weak self] index in self?.goToPage(index, fromFilmstrip: true) }
-        view.insertSubview(filmstrip, aboveSubview: bottomScrim)
+        // No backdrop behind the strip — it sits directly over the photo so a tall
+        // portrait shows through beneath it. Kept below the tab bar in z-order.
+        view.insertSubview(filmstrip, belowSubview: tabBar)
 
         NSLayoutConstraint.activate([
             filmstrip.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             filmstrip.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            filmstrip.bottomAnchor.constraint(equalTo: bottomBar.topAnchor),
+            filmstrip.bottomAnchor.constraint(equalTo: tabBar.topAnchor, constant: -4),
             filmstrip.heightAnchor.constraint(equalToConstant: PhotoFilmstripView.preferredHeight),
-            bottomScrim.topAnchor.constraint(equalTo: filmstrip.topAnchor),
-            bottomScrim.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            bottomScrim.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            bottomScrim.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
     }
 
@@ -238,6 +248,19 @@ final class PhotoViewerController: UIViewController {
 
     private func updateTitle() {
         topItem.title = currentPhoto?.fileName
+        onCurrentPhotoChanged?(currentPhoto)
+        configureTabBar()
+    }
+
+    /// The viewer's tab bar reflects the *current image's* name (not the active tab's
+    /// title), so it reads correctly even while another tab slides in over it, and so
+    /// the tab title follows the open photo. Count + warming come from the model.
+    private func configureTabBar() {
+        let warming = environment.warmingCoordinator?.state == .warming
+        tabBar.configure(
+            title: currentPhoto?.fileName ?? "", count: tabs.tabs.count, isWarming: warming,
+            galleryEnabled: false, canZoomIn: false, canZoomOut: false
+        )
     }
 
     // MARK: - Chrome
@@ -246,68 +269,199 @@ final class PhotoViewerController: UIViewController {
         fadeChrome(hidden: !chromeHidden)
     }
 
-    private var chromeViews: [UIView] { [topBar, bottomScrim, filmstrip, bottomBar] }
+    /// Viewer-level chrome (the Done/Save bar + filmstrip) — faded by the open / close
+    /// / swipe transitions. The tab bar is deliberately excluded: it's the tab's
+    /// persistent chrome and stays visible over the photo (and through a swipe-to-
+    /// dismiss); only the tap-to-hide toggle hides it (see ``toggleChromeViews``).
+    private var transitionChromeViews: [UIView] { [topBar, filmstrip] }
 
-    /// Sets chrome opacity directly (used inside the transition animation blocks).
+    /// Everything the tap-to-hide toggle shows/hides — includes the tab bar.
+    private var toggleChromeViews: [UIView] { [topBar, filmstrip, tabBar] }
+
+    /// Sets the viewer chrome opacity directly (used inside the transition animation
+    /// blocks). Leaves the tab bar untouched so it stays put over the content.
     func setChromeAlpha(_ alpha: CGFloat) {
-        chromeViews.forEach { $0.alpha = alpha }
-    }
-
-    /// Sets chrome visibility without animation (used to restore after a transition).
-    func setChromeHidden(_ hidden: Bool) {
-        chromeHidden = hidden
-        setChromeAlpha(hidden ? 0 : 1)
+        transitionChromeViews.forEach { $0.alpha = alpha }
     }
 
     private func fadeChrome(hidden: Bool) {
         chromeHidden = hidden
-        UIView.animate(withDuration: 0.25) { self.setChromeAlpha(hidden ? 0 : 1) }
+        UIView.animate(withDuration: 0.25) {
+            self.toggleChromeViews.forEach { $0.alpha = hidden ? 0 : 1 }
+        }
     }
 
-    // MARK: - Swipe-down dismiss
+    // MARK: - Open / close / swipe (self-driven hero)
 
     private var dismissDistance: CGFloat { max(1, view.bounds.height * 0.5) }
     private let dismissThreshold: CGFloat = 120
 
+    /// Grows the photo out of its source tile. Called by the host once the viewer's
+    /// view is in the hierarchy. Falls back to a cross-fade when there's no tile.
+    func animateOpen() {
+        let id = currentPhotoID
+        let heroImage = source?.viewerSourceImage(forPhotoID: id) ?? currentDisplayedImage
+        let sourceFrame = source?.viewerSourceFrame(forPhotoID: id, in: view)
+        let aspect = heroImage.map { $0.size.height > 0 ? $0.size.width / $0.size.height : 1 } ?? currentAspectRatio
+        let endFrame = fittedRect(forAspectRatio: aspect)
+
+        backdropView.alpha = 0
+        setChromeAlpha(0)
+
+        guard let sourceFrame, let heroImage else {
+            backdropView.alpha = 1
+            view.alpha = 0
+            UIView.animate(withDuration: 0.42) { self.view.alpha = 1; self.setChromeAlpha(1) }
+            return
+        }
+
+        setPageContentHidden(true)
+        source?.setViewerSourceHidden(true, forPhotoID: id)
+        let hero = PhotoHero.makeHeroView(image: heroImage)
+        hero.frame = sourceFrame
+        hero.layer.cornerRadius = PhotoHero.tileCornerRadius
+        insertTransitionHero(hero)
+        // Sharpen the hero as the page's loader yields preview/full stages.
+        onCurrentImageUpgrade = { [weak hero] image in hero?.image = image }
+
+        UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0, options: [.curveEaseOut]) {
+            hero.frame = endFrame
+            hero.layer.cornerRadius = 0
+            self.backdropView.alpha = 1
+            self.setChromeAlpha(1)
+        } completion: { _ in
+            self.onCurrentImageUpgrade = nil
+            hero.removeFromSuperview()
+            self.setPageContentHidden(false)
+            self.source?.setViewerSourceHidden(false, forPhotoID: id)
+        }
+    }
+
+    /// Shrinks the photo back into its tile, then asks the host to remove us.
+    private func animateClose() {
+        let id = currentPhotoID
+        let heroImage = currentDisplayedImage ?? source?.viewerSourceImage(forPhotoID: id)
+        let startFrame = currentImageOnScreenRect ?? fittedRect(forAspectRatio: currentAspectRatio)
+        let destFrame = source?.viewerSourceFrame(forPhotoID: id, in: view)
+
+        guard let heroImage else {
+            UIView.animate(withDuration: 0.32, animations: { self.view.alpha = 0 }, completion: { _ in self.onClose?() })
+            return
+        }
+        setPageContentHidden(true)
+        source?.setViewerSourceHidden(true, forPhotoID: id)
+        let hero = PhotoHero.makeHeroView(image: heroImage)
+        hero.frame = startFrame
+        insertTransitionHero(hero)
+
+        UIView.animate(withDuration: 0.32, delay: 0, options: [.curveEaseInOut]) {
+            if let destFrame {
+                hero.frame = destFrame
+                hero.layer.cornerRadius = PhotoHero.tileCornerRadius
+            } else {
+                hero.alpha = 0
+                hero.frame = startFrame.insetBy(dx: startFrame.width * 0.2, dy: startFrame.height * 0.2)
+                    .offsetBy(dx: 0, dy: startFrame.height * 0.3)
+            }
+            self.backdropView.alpha = 0
+            self.setChromeAlpha(0)
+        } completion: { _ in
+            hero.removeFromSuperview()
+            self.source?.setViewerSourceHidden(false, forPhotoID: id)
+            self.onClose?()
+        }
+    }
+
     @objc private func handleDismissPan(_ pan: UIPanGestureRecognizer) {
         switch pan.state {
         case .began:
-            guard let transitionController else { return }
-            // Freeze horizontal paging so a diagonal (down-and-sideways) drag is a
-            // pure dismissal and can't also page to a neighbour mid-gesture.
+            // Freeze horizontal paging so a diagonal drag is a pure dismissal.
             pagingScrollView?.isScrollEnabled = false
-            transitionController.isInteractive = true
             thresholdHapticFired = false
             dismissHaptic.prepare()
             chromeHiddenBeforeDrag = chromeHidden
-            fadeChrome(hidden: true)
-            dismiss(animated: true)
+            beginSwipe()
 
         case .changed:
             let translation = pan.translation(in: view)
-            let progress = max(0, min(1, translation.y / dismissDistance))
-            transitionController?.activeDriver?.update(progress: progress, translation: translation)
+            updateSwipe(translation: translation)
             if !thresholdHapticFired, translation.y > dismissThreshold {
                 thresholdHapticFired = true
                 dismissHaptic.impactOccurred()
             }
 
         case .ended, .cancelled, .failed:
-            // Re-enable paging (a cancelled drag returns to the normal pager).
             pagingScrollView?.isScrollEnabled = true
             let translation = pan.translation(in: view)
             let velocity = pan.velocity(in: view)
             let shouldDismiss = translation.y > 0 && (translation.y > dismissThreshold || velocity.y > 1000)
-            transitionController?.isInteractive = false
-            if shouldDismiss {
-                transitionController?.activeDriver?.finish(velocity: velocity)
-            } else {
-                fadeChrome(hidden: chromeHiddenBeforeDrag)
-                transitionController?.activeDriver?.cancel()
-            }
+            if shouldDismiss { finishSwipe(velocity: velocity) } else { cancelSwipe() }
 
         default:
             break
+        }
+    }
+
+    private func beginSwipe() {
+        swipePhotoID = currentPhotoID
+        swipeStartFrame = currentImageOnScreenRect ?? fittedRect(forAspectRatio: currentAspectRatio)
+        let hero = PhotoHero.makeHeroView(image: currentDisplayedImage ?? source?.viewerSourceImage(forPhotoID: swipePhotoID))
+        hero.frame = swipeStartFrame
+        insertTransitionHero(hero)
+        swipeHero = hero
+        setPageContentHidden(true)
+        source?.setViewerSourceHidden(true, forPhotoID: swipePhotoID)
+        // Fade the viewer chrome (Done bar + filmstrip) but keep the tab bar visible —
+        // it stays over the dismissing photo as the tab's persistent chrome.
+        UIView.animate(withDuration: 0.25) { self.setChromeAlpha(0) }
+    }
+
+    private func updateSwipe(translation: CGPoint) {
+        guard let hero = swipeHero else { return }
+        let progress = max(0, min(1, translation.y / dismissDistance))
+        let scale = max(0.5, 1 - progress * 0.5)
+        let size = CGSize(width: swipeStartFrame.width * scale, height: swipeStartFrame.height * scale)
+        let center = CGPoint(x: swipeStartFrame.midX + translation.x, y: swipeStartFrame.midY + translation.y)
+        hero.frame = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
+        backdropView.alpha = max(0, 1 - progress)
+    }
+
+    private func finishSwipe(velocity: CGPoint) {
+        guard let hero = swipeHero else { onClose?(); return }
+        swipeHero = nil
+        let destFrame = source?.viewerSourceFrame(forPhotoID: swipePhotoID, in: view)
+        source?.setViewerSourceHidden(true, forPhotoID: swipePhotoID)
+        let distance = destFrame.map { abs($0.midY - hero.frame.midY) } ?? 1
+        let springVelocity = min(1.5, abs(velocity.y) / max(1, distance))
+
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: springVelocity, options: [.curveEaseOut, .allowUserInteraction]) {
+            if let destFrame {
+                hero.frame = destFrame
+                hero.layer.cornerRadius = PhotoHero.tileCornerRadius
+            } else {
+                hero.alpha = 0
+                hero.frame = hero.frame.insetBy(dx: hero.frame.width * 0.15, dy: hero.frame.height * 0.15).offsetBy(dx: 0, dy: 80)
+            }
+            self.backdropView.alpha = 0
+        } completion: { _ in
+            hero.removeFromSuperview()
+            self.source?.setViewerSourceHidden(false, forPhotoID: self.swipePhotoID)
+            self.onClose?()
+        }
+    }
+
+    private func cancelSwipe() {
+        guard let hero = swipeHero else { return }
+        swipeHero = nil
+        fadeChrome(hidden: chromeHiddenBeforeDrag)
+        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.3, options: [.curveEaseOut]) {
+            hero.frame = self.swipeStartFrame
+            hero.layer.cornerRadius = 0
+            self.backdropView.alpha = 1
+        } completion: { _ in
+            hero.removeFromSuperview()
+            self.setPageContentHidden(false)
+            self.source?.setViewerSourceHidden(false, forPhotoID: self.swipePhotoID)
         }
     }
 
@@ -355,13 +509,6 @@ final class PhotoViewerController: UIViewController {
         view.insertSubview(heroView, aboveSubview: pageController.view)
     }
 
-    /// Called by the dismiss paths once the viewer is actually gone, exactly once.
-    func handleDidDismiss() {
-        guard !didDismiss else { return }
-        didDismiss = true
-        onDidDismiss?()
-    }
-
     // MARK: - Save button
 
     private func updateSaveButton(for status: PhotoSaver.Status) {
@@ -392,12 +539,7 @@ final class PhotoViewerController: UIViewController {
 
     // MARK: - Actions
 
-    @objc private func doneTapped() {
-        transitionController?.isInteractive = false
-        dismiss(animated: true) { [weak self] in self?.handleDidDismiss() }
-    }
-
-    @objc private func showTabsTapped() { tabs.openSwitcher() }
+    @objc private func doneTapped() { animateClose() }
 
     @objc private func saveTapped() {
         guard let photo = currentPhoto else { return }
@@ -447,11 +589,13 @@ extension PhotoViewerController: UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // The chrome-toggle tap ignores touches on the bars / filmstrip so their own
-        // controls (Done, Save, Show Tabs, filmstrip cells) handle the tap instead.
-        guard gestureRecognizer === chromeTap, let touched = touch.view else { return true }
+        // The chrome-toggle tap AND the swipe-dismiss ignore touches on the bars /
+        // filmstrip, so their own controls handle them — and crucially so dragging the
+        // tab bar drives only the carousel, not the viewer's swipe-dismiss.
+        guard gestureRecognizer === chromeTap || gestureRecognizer === dismissPan,
+              let touched = touch.view else { return true }
         return !touched.isDescendant(of: topBar)
-            && !touched.isDescendant(of: bottomBar)
+            && !touched.isDescendant(of: tabBar)
             && !touched.isDescendant(of: filmstrip)
     }
 }
