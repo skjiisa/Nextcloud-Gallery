@@ -277,7 +277,7 @@ extension FlatGalleryViewController: UICollectionViewDelegate, UICollectionViewD
         collectionView.deselectItem(at: indexPath, animated: false)
         guard let item = dataSource.itemIdentifier(for: indexPath) else { return }
         let photos = items.map(PhotoItem.init(snapshot:))
-        navigator?.openViewer(photos: photos, initialID: item.ocId)
+        navigator?.openViewer(photos: photos, initialID: item.ocId, source: self)
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
@@ -285,5 +285,21 @@ extension FlatGalleryViewController: UICollectionViewDelegate, UICollectionViewD
             guard let item = dataSource.itemIdentifier(for: indexPath), item.hasPreview else { continue }
             ImageLoader.shared.prefetch(ocId: item.ocId, fileId: item.fileId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels, store: thumbnailStore, client: client)
         }
+    }
+}
+
+// MARK: - Viewer transition source
+
+extension FlatGalleryViewController: PhotoViewerTransitionSource {
+    func viewerSourceFrame(forPhotoID id: String, in space: UICoordinateSpace) -> CGRect? {
+        GridTransitionSource.sourceFrame(forPhotoID: id, in: space, collectionView: collectionView, items: items)
+    }
+
+    func viewerSourceImage(forPhotoID id: String) -> UIImage? {
+        GridTransitionSource.sourceImage(forPhotoID: id, collectionView: collectionView, items: items)
+    }
+
+    func setViewerSourceHidden(_ hidden: Bool, forPhotoID id: String) {
+        GridTransitionSource.setHidden(hidden, forPhotoID: id, collectionView: collectionView, items: items)
     }
 }

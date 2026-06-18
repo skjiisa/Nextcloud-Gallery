@@ -59,7 +59,9 @@ extension PhotoItem {
             fileId: snapshot.fileId,
             etag: snapshot.etag,
             fileName: snapshot.fileName,
-            serverPath: snapshot.fullPath
+            serverPath: snapshot.fullPath,
+            width: snapshot.width,
+            height: snapshot.height
         )
     }
 }

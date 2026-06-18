@@ -213,8 +213,21 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
                 environment: environment, tabs: tabs
             )
             let openingTab = tabs.activeTab
-            viewer.onClose = { [weak openingTab] in openingTab?.viewer = nil }
+
+            // Wire the grow/shrink/swipe transition, carrying the grid that opened it.
+            let transition = PhotoViewerTransitionController()
+            transition.source = openingTab.viewerSource
+            viewer.transitionController = transition
+            viewer.transitioningDelegate = transition
             viewer.modalPresentationStyle = .overFullScreen
+
+            // Cleared after the viewer actually dismisses (Done or swipe). Drops our
+            // reference first so the resulting `viewer == nil` sync is a no-op.
+            viewer.onDidDismiss = { [weak self, weak openingTab] in
+                self?.viewerVC = nil
+                openingTab?.viewer = nil
+                openingTab?.viewerSource = nil
+            }
             viewerVC = viewer
             topmostPresenter().present(viewer, animated: true)
         } else if presentation == nil, let viewer = viewerVC {
