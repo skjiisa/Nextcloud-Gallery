@@ -16,7 +16,11 @@ final class FolderGridViewController: UIViewController {
     private let account: String
     private let environment: AppEnvironment
     private let client: NextcloudClient
+    private let browseTab: BrowseTab
     private weak var navigator: GalleryNavigator?
+
+    private var tabObservation: ObservationToken?
+    private var appliedZoom: GalleryGridZoom
 
     private var collectionView: UICollectionView!
     private var dataSource: UICollectionViewDiffableDataSource<Int, GridItemSnapshot>!
@@ -29,15 +33,24 @@ final class FolderGridViewController: UIViewController {
     private var didInitialLoad = false
     private var cacheObserver: NSObjectProtocol?
 
+    /// Whether this folder contains any subfolder — drives the bottom bar's Gallery
+    /// toggle (a folder with no subfolders is already shown flat, so the toggle is
+    /// disabled). Fires `onContentChanged` when it may have changed.
+    var hasSubfolders: Bool { items.contains { $0.isDirectory } }
+    /// Called when `items` change (so the host can refresh bar state).
+    var onContentChanged: (() -> Void)?
+
     private var thumbnailStore: ThumbnailStore { environment.thumbnailStore }
     private var cacheStore: CacheStore { environment.cacheStore }
 
-    init(folderPath: String, title: String, account: String, environment: AppEnvironment, client: NextcloudClient, navigator: GalleryNavigator?) {
+    init(folderPath: String, title: String, account: String, environment: AppEnvironment, client: NextcloudClient, tab: BrowseTab, navigator: GalleryNavigator?) {
         self.folderPath = folderPath
         self.folderTitle = title
         self.account = account
         self.environment = environment
         self.client = client
+        self.browseTab = tab
+        self.appliedZoom = tab.zoom
         self.navigator = navigator
         super.init(nibName: nil, bundle: nil)
     }
@@ -53,15 +66,12 @@ final class FolderGridViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         navigationItem.title = folderTitle
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            title: "Gallery", image: UIImage(systemName: "square.grid.3x3"),
-            target: self, action: #selector(openFlatGallery)
-        )
 
         setUpCollectionView()
         setUpStatusView()
         configureDataSource()
         observeCacheChanges()
+        observeZoom()
 
         // Rebuild the layout when the size class changes (min cell size differs).
         registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (self: Self, _) in
@@ -69,6 +79,21 @@ final class FolderGridViewController: UIViewController {
         }
 
         reloadFromCache()
+    }
+
+    /// Re-lay-out with a bouncy spring when the tab's zoom changes (the bottom bar's
+    /// zoom buttons drive this folder grid as well as the flattened gallery).
+    private func observeZoom() {
+        tabObservation = observeChanges { [weak self] in
+            guard let self else { return }
+            let zoom = self.browseTab.zoom
+            guard zoom != self.appliedZoom else { return }
+            self.appliedZoom = zoom
+            UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.3, options: [.allowUserInteraction]) {
+                self.collectionView.setCollectionViewLayout(self.makeLayout(), animated: false)
+                self.collectionView.layoutIfNeeded()
+            }
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -84,7 +109,8 @@ final class FolderGridViewController: UIViewController {
     private func makeLayout() -> UICollectionViewLayout {
         let metrics = LayoutMetrics(traits: traitCollection)
         return GalleryGridLayout.make(
-            minItemWidth: metrics.minGridCellSize, spacing: metrics.gridSpacing, sectionInset: metrics.contentPadding
+            minItemWidth: metrics.minGridCellSize * browseTab.zoom.cellSizeMultiplier,
+            spacing: metrics.gridSpacing, sectionInset: metrics.contentPadding
         )
     }
 
@@ -149,6 +175,7 @@ final class FolderGridViewController: UIViewController {
             self.items = snapshots
             applySnapshot()
             updateStatus()
+            onContentChanged?()
         }
     }
 
@@ -194,10 +221,6 @@ final class FolderGridViewController: UIViewController {
     }
 
     // MARK: - Actions
-
-    @objc private func openFlatGallery() {
-        navigator?.openFlatGallery(FlatGalleryRoute(folderPath: folderPath, title: folderTitle, account: account))
-    }
 
     @objc private func pullToRefresh() {
         Task { await load() }
