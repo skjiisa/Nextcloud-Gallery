@@ -13,6 +13,15 @@ import SwiftData
 /// cached item is a folder and this row carries crawl bookkeeping.
 @Model
 nonisolated final class FolderState {
+    // Covers the warming-crawl claim/count queries so they don't scan every folder
+    // row. Both lead with `[account, listStateRaw]` (the equality filter) and trail
+    // with `depth` (the sort), matching `claimNextPending`/`claimNextNeedingThumbnails`
+    // and the `pending`/`reset`/`folderCount` queries.
+    #Index<FolderState>(
+        [\.account, \.listStateRaw, \.depth],
+        [\.account, \.listStateRaw, \.thumbnailsReady, \.depth]
+    )
+
     /// Normalized full path of the folder — the upsert key.
     @Attribute(.unique) var folderPath: String
     var account: String
