@@ -2,11 +2,19 @@
 //  BrowseNavController.swift
 //  Nextcloud Gallery
 //
-//  One tab's page: a navigation controller rooted at the Files-root folder grid,
-//  with the tab's Liquid Glass bottom bar floating above the content. Uses the
-//  normal navigation stack (the standard top-bar back button); the bottom bar holds
-//  the reach-friendly actions (zoom, gallery toggle, new tab, settings) and the tab
-//  switcher handle. Keeps ``BrowseTab/path`` in sync for restore + the switcher.
+//  One tab's page. Hosts a child ``UINavigationController`` (rooted at the Files-root
+//  folder grid) with the tab's Liquid Glass bottom bar — and, when a photo is open,
+//  the photo viewer — floating *above* the nav as siblings. It is deliberately a plain
+//  view controller wrapping a nav controller rather than a `UINavigationController`
+//  subclass: a `UINavigationController` re-manages the subviews of its own view (it
+//  wraps content in transition containers and reorders on layout), which ejects any
+//  full-screen overlay added directly to it. Keeping the bar + viewer as siblings of
+//  the nav's view means they ride the carousel and stay put.
+//
+//  Navigation uses the normal stack (the standard top-bar back button); the bottom bar
+//  holds the reach-friendly actions (zoom, gallery toggle, new tab, settings) and the
+//  tab switcher handle. The embedded viewer rides the carousel and persists per tab
+//  (see ``RootCarouselViewController``). Keeps ``BrowseTab/path`` in sync for restore.
 //
 
 import UIKit
@@ -18,15 +26,21 @@ protocol CarouselDragHandling: AnyObject {
     func carouselDragEnded(translation: CGFloat)
 }
 
-final class BrowseNavController: UINavigationController {
+final class BrowseNavController: UIViewController {
     let browseTab: BrowseTab
     private let environment: AppEnvironment
     private let client: NextcloudClient
     private let tabsModel: TabsModel
     private weak var dragHandler: CarouselDragHandling?
 
+    /// The actual navigation stack, hosted as a child so its view-management can't
+    /// disturb the floating overlays layered above it.
+    private let navController = UINavigationController()
+
     private let bar = GlassTabBar()
     private var barObservation: ObservationToken?
+    private var photoViewer: PhotoViewerController?
+    private var viewerObservation: ObservationToken?
 
     init(tab: BrowseTab, environment: AppEnvironment, client: NextcloudClient, tabsModel: TabsModel, dragHandler: CarouselDragHandling?) {
         self.browseTab = tab
@@ -39,8 +53,8 @@ final class BrowseNavController: UINavigationController {
         // Build the VC stack: Files-root grid + each persisted route.
         let root = makeViewController(forRoot: true, route: nil)
         let pushed = browseTab.path.map { makeViewController(forRoot: false, route: $0) }
-        setViewControllers([root] + pushed, animated: false)
-        delegate = self
+        navController.setViewControllers([root] + pushed, animated: false)
+        navController.delegate = self
     }
 
     @available(*, unavailable)
@@ -48,7 +62,72 @@ final class BrowseNavController: UINavigationController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+
+        // Host the nav stack full-bleed; overlays are added above it afterwards.
+        addChild(navController)
+        navController.view.frame = view.bounds
+        navController.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(navController.view)
+        navController.didMove(toParent: self)
+
         setUpBar()
+        // Embed/remove the tab's photo viewer to match its model. As a child of this
+        // page (a sibling above the nav stack, not a modal), it rides the carousel and
+        // persists per tab.
+        viewerObservation = observeChanges { [weak self] in
+            guard let self else { return }
+            self.syncPhotoViewer(self.browseTab.viewer)
+        }
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // Belt-and-braces: keep the overlays above the nav stack (cheap, and these are
+        // genuine siblings now so it won't fight the nav controller).
+        view.bringSubviewToFront(bar)
+        if let photoViewer { view.bringSubviewToFront(photoViewer.view) }
+    }
+
+    // MARK: - Embedded photo viewer
+
+    private func syncPhotoViewer(_ presentation: ViewerPresentation?) {
+        if let presentation, photoViewer?.viewerID != presentation.id {
+            embedPhotoViewer(presentation)
+        } else if presentation == nil, photoViewer != nil {
+            removePhotoViewer()
+        }
+    }
+
+    private func embedPhotoViewer(_ presentation: ViewerPresentation) {
+        removePhotoViewer()
+        let viewer = PhotoViewerController(
+            photos: presentation.photos, initialID: presentation.initialID,
+            environment: environment, tabs: tabsModel
+        )
+        viewer.source = browseTab.viewerSource
+        viewer.dragHandler = dragHandler
+        viewer.onClose = { [weak self] in
+            self?.removePhotoViewer()
+            self?.browseTab.viewer = nil
+            self?.browseTab.viewerSource = nil
+        }
+        addChild(viewer)
+        viewer.view.frame = view.bounds
+        viewer.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(viewer.view)
+        viewer.didMove(toParent: self)
+        photoViewer = viewer
+        view.layoutIfNeeded()
+        viewer.animateOpen()
+    }
+
+    private func removePhotoViewer() {
+        guard let viewer = photoViewer else { return }
+        photoViewer = nil
+        viewer.willMove(toParent: nil)
+        viewer.view.removeFromSuperview()
+        viewer.removeFromParent()
     }
 
     // MARK: - Bar
@@ -79,7 +158,7 @@ final class BrowseNavController: UINavigationController {
     /// is also called on navigation events for the non-observable stack state.
     private func updateBarState() {
         let warming = environment.warmingCoordinator?.state == .warming
-        let galleryEnabled = (topViewController as? FolderGridViewController)?.hasSubfolders ?? false
+        let galleryEnabled = (navController.topViewController as? FolderGridViewController)?.hasSubfolders ?? false
         bar.configure(
             title: browseTab.title,
             count: tabsModel.tabs.count,
@@ -108,7 +187,7 @@ final class BrowseNavController: UINavigationController {
         let grid = FolderGridViewController(folderPath: folderPath, title: title, account: account, environment: environment, client: client, tab: browseTab, navigator: self)
         // Subfolders may appear after a load → refresh the Gallery toggle state.
         grid.onContentChanged = { [weak self, weak grid] in
-            guard let self, self.topViewController === grid else { return }
+            guard let self, self.navController.topViewController === grid else { return }
             self.updateBarState()
         }
         return grid
@@ -119,13 +198,13 @@ final class BrowseNavController: UINavigationController {
     private func navigate(to route: BrowseRoute) {
         browseTab.path.append(route)
         tabsModel.save()
-        pushViewController(makeViewController(forRoot: false, route: route), animated: true)
+        navController.pushViewController(makeViewController(forRoot: false, route: route), animated: true)
     }
 
     /// Flattens the current folder into the gallery (only meaningful when a browse
     /// grid with subfolders is showing — the bar disables the button otherwise).
     private func toggleGallery() {
-        guard topViewController is FolderGridViewController else { return }
+        guard navController.topViewController is FolderGridViewController else { return }
         let (path, title, account): (String, String, String)
         if let last = browseTab.path.last, case .folder(let r) = last {
             (path, title, account) = (r.folderPath, r.title, r.account)
@@ -175,7 +254,7 @@ extension BrowseNavController: UINavigationControllerDelegate {
     func navigationController(_ navigationController: UINavigationController, didShow viewController: UIViewController, animated: Bool) {
         // A pop (back button / edge-swipe) leaves fewer VCs than path entries — trim
         // the path so it persists and the switcher title is correct.
-        let depth = viewControllers.count - 1
+        let depth = navigationController.viewControllers.count - 1
         if depth < browseTab.path.count {
             browseTab.path = Array(browseTab.path.prefix(depth))
             tabsModel.save()
