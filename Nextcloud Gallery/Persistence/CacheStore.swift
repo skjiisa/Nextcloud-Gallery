@@ -15,6 +15,18 @@ import NextcloudKit
 /// which auto-merges these saves.
 @ModelActor
 actor CacheStore {
+    // `@ModelActor`'s default executor runs the actor's body on whatever thread
+    // reaches it. Reached via `await` from the @MainActor UI and warming code, that
+    // thread is the main thread — so every SwiftData fetch/save ran on main and
+    // stalled scrolling during a cold warm (warming floods this actor). Pin the
+    // actor to a dedicated background serial queue so all its SwiftData work stays
+    // off-main. Safe: reads return Sendable snapshots, and writes signal through
+    // ``CacheChange``, whose observers are registered on `.main`.
+    private nonisolated let queue = DispatchSerialQueue(
+        label: "app.lyons.Nextcloud-Gallery.cachestore", qos: .userInitiated
+    )
+    nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
+
     /// Upserts the children of a folder from a fresh listing, prunes deleted
     /// entries, ensures a ``FolderState`` exists for each child folder, and marks
     /// the parent folder as listed.
