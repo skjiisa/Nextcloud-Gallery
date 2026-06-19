@@ -16,6 +16,21 @@ import NextcloudKit
 /// mutate instances; the project otherwise defaults declarations to `@MainActor`.
 @Model
 nonisolated final class CachedItem {
+    // Covers the hot read paths so they're index lookups, not full-table scans of
+    // the whole (multi-folder) library, which otherwise grow linearly with it:
+    //  - `[account, parentPath]`            → a folder's direct children
+    //    (`children`, `folderItems`, `hasSubfolders`, `gridThumbnailTargets`).
+    //  - `[account, classFile, parentPath]` → images under a subtree, where the
+    //    trailing `parentPath` serves both `== base` and `starts(with:)` range
+    //    scans (`flatItems`, `pruneMissingImages`).
+    //  - `[account, fullPath]`              → a folder's own cached row
+    //    (`cachedFolderItem`).
+    #Index<CachedItem>(
+        [\.account, \.parentPath],
+        [\.account, \.classFile, \.parentPath],
+        [\.account, \.fullPath]
+    )
+
     /// Globally unique server id for this instance — the upsert key.
     @Attribute(.unique) var ocId: String
     var account: String

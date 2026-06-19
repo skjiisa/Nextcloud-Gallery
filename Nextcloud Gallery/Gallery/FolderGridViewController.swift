@@ -264,6 +264,21 @@ extension FolderGridViewController: UICollectionViewDelegate, UICollectionViewDa
             }
         }
     }
+
+    /// The item scrolled out of the prefetch window before it finished loading —
+    /// cancel it so its download yields the gate to on-screen cells.
+    func collectionView(_ collectionView: UICollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
+        for indexPath in indexPaths {
+            guard let item = dataSource.itemIdentifier(for: indexPath) else { continue }
+            if item.isDirectory {
+                for tile in item.coverTiles {
+                    ImageLoader.shared.cancelPrefetch(ocId: tile.ocId, etag: tile.etag, pixels: NextcloudConfig.coverTilePixels)
+                }
+            } else if item.hasPreview {
+                ImageLoader.shared.cancelPrefetch(ocId: item.ocId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels)
+            }
+        }
+    }
 }
 
 // MARK: - Viewer transition source

@@ -39,6 +39,12 @@ nonisolated enum NextcloudConfig {
     /// so this stays bounded for huge folders.
     static let gridThumbnailPrefetchLimit = 30
 
+    /// Max thumbnail downloads in flight at once (across visible cells, grid
+    /// prefetch, and warming), gated by ``ThumbnailDownloadGate`` so visible cells
+    /// outrank the rest. Kept at `httpMaximumConnectionsPerHost` so this gate, not
+    /// URLSession's unordered connection queue, decides what loads next.
+    static let maxConcurrentThumbnailDownloads = 6
+
     /// Max results requested from a flattened-gallery media SEARCH. Generous so a
     /// single request covers typical libraries; date-windowed pagination can be
     /// added later for very large folders.
