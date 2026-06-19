@@ -280,6 +280,15 @@ extension FlatGalleryViewController: UICollectionViewDelegate, UICollectionViewD
             ImageLoader.shared.prefetch(ocId: item.ocId, fileId: item.fileId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels, store: thumbnailStore, client: client)
         }
     }
+
+    /// The item scrolled out of the prefetch window before it finished loading —
+    /// cancel it so its download yields the gate to on-screen cells.
+    func collectionView(_ collectionView: UICollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
+        for indexPath in indexPaths {
+            guard let item = dataSource.itemIdentifier(for: indexPath), item.hasPreview else { continue }
+            ImageLoader.shared.cancelPrefetch(ocId: item.ocId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels)
+        }
+    }
 }
 
 // MARK: - Viewer transition source
