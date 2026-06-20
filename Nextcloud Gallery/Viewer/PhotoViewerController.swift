@@ -158,6 +158,7 @@ final class PhotoViewerController: UIViewController {
         tabBar.onSettings = { [weak self] in self?.tabs.isShowingSettings = true }
         tabBar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
         tabBar.onDragEnded = { [weak self] tx in self?.dragHandler?.carouselDragEnded(translation: tx) }
+        tabBar.onDragCancelled = { [weak self] in self?.dragHandler?.carouselDragCancelled() }
 
         view.addSubview(tabBar)
         view.addSubview(topBar)
@@ -259,7 +260,7 @@ final class PhotoViewerController: UIViewController {
         let warming = environment.warmingCoordinator?.state == .warming
         tabBar.configure(
             title: currentPhoto?.fileName ?? "", count: tabs.tabs.count, isWarming: warming,
-            galleryEnabled: false, canZoomIn: false, canZoomOut: false
+            galleryEnabled: false, galleryActive: false, canZoomIn: false, canZoomOut: false
         )
     }
 

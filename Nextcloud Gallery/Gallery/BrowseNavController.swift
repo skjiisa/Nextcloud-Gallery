@@ -24,6 +24,10 @@ import UIKit
 protocol CarouselDragHandling: AnyObject {
     func carouselDragChanged(translation: CGFloat)
     func carouselDragEnded(translation: CGFloat)
+    /// Abandon an in-flight drag and re-center the active tab *immediately*, with no
+    /// snap animation — used when a drag resolves to opening the switcher, so the live
+    /// screen is at rest before its card snapshot is captured.
+    func carouselDragCancelled()
 }
 
 final class BrowseNavController: UIViewController {
@@ -41,6 +45,9 @@ final class BrowseNavController: UIViewController {
     private var barObservation: ObservationToken?
     private var photoViewer: PhotoViewerController?
     private var viewerObservation: ObservationToken?
+    /// True while the Gallery toggle's cross-dissolve is in flight, to ignore repeat
+    /// taps until it settles.
+    private var isSwappingPresentation = false
 
     init(tab: BrowseTab, environment: AppEnvironment, client: NextcloudClient, tabsModel: TabsModel, dragHandler: CarouselDragHandling?) {
         self.browseTab = tab
@@ -50,10 +57,10 @@ final class BrowseNavController: UIViewController {
         self.dragHandler = dragHandler
         super.init(nibName: nil, bundle: nil)
 
-        // Build the VC stack: Files-root grid + each persisted route.
-        let root = makeViewController(forRoot: true, route: nil)
-        let pushed = browseTab.path.map { makeViewController(forRoot: false, route: $0) }
-        navController.setViewControllers([root] + pushed, animated: false)
+        // Build the VC stack: one screen per level (Files-root + each persisted
+        // route), each in its stored presentation mode.
+        let stack = (0...browseTab.path.count).map { makeViewController(atDepth: $0) }
+        navController.setViewControllers(stack, animated: false)
         navController.delegate = self
     }
 
@@ -147,6 +154,7 @@ final class BrowseNavController: UIViewController {
         bar.onShowTabs = { [weak self] in self?.tabsModel.openSwitcher() }
         bar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
         bar.onDragEnded = { [weak self] tx in self?.dragHandler?.carouselDragEnded(translation: tx) }
+        bar.onDragCancelled = { [weak self] in self?.dragHandler?.carouselDragCancelled() }
         view.addSubview(bar)
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
@@ -163,12 +171,17 @@ final class BrowseNavController: UIViewController {
     /// is also called on navigation events for the non-observable stack state.
     private func updateBarState() {
         let warming = environment.warmingCoordinator?.state == .warming
-        let galleryEnabled = (navController.topViewController as? FolderGridViewController)?.hasSubfolders ?? false
+        // The toggle is live on any folder/gallery screen; it's "active" (filled)
+        // while the flattened gallery is the one showing.
+        let top = navController.topViewController
+        let galleryActive = top is FlatGalleryViewController
+        let galleryEnabled = galleryActive || top is FolderGridViewController
         bar.configure(
             title: browseTab.title,
             count: tabsModel.tabs.count,
             isWarming: warming,
             galleryEnabled: galleryEnabled,
+            galleryActive: galleryActive,
             canZoomIn: browseTab.zoom.canZoomIn,
             canZoomOut: browseTab.zoom.canZoomOut
         )
@@ -176,21 +189,40 @@ final class BrowseNavController: UIViewController {
 
     // MARK: - Destinations
 
-    private func makeViewController(forRoot: Bool, route: BrowseRoute?) -> UIViewController {
-        if forRoot {
-            return makeFolderGrid(folderPath: client.filesRootPath, title: "Photos", account: client.credentials.account)
+    /// The folder shown at stack `depth` (0 == the Files-root "Photos" level), with
+    /// its current presentation mode. The root has no route entry, so its mode lives
+    /// on the tab; deeper levels carry their own.
+    private func location(atDepth depth: Int) -> (folderPath: String, title: String, account: String, mode: BrowseRoute.Mode) {
+        if depth <= 0 {
+            return (client.filesRootPath, "Photos", client.credentials.account, browseTab.rootMode)
         }
-        switch route! {
-        case .folder(let r):
-            return makeFolderGrid(folderPath: r.folderPath, title: r.title, account: r.account)
-        case .flat(let r):
-            return FlatGalleryViewController(folderPath: r.folderPath, title: r.title, account: r.account, environment: environment, client: client, tab: browseTab, navigator: self)
+        let route = browseTab.path[depth - 1]
+        return (route.folderPath, route.title, route.account, route.mode)
+    }
+
+    private func makeViewController(atDepth depth: Int) -> UIViewController {
+        let l = location(atDepth: depth)
+        return makeViewController(folderPath: l.folderPath, title: l.title, account: l.account, mode: l.mode)
+    }
+
+    /// Builds a folder's screen in the given presentation mode, pre-set with the
+    /// bottom bar's safe-area inset so content clears the floating bar however the
+    /// screen arrives — pushed, restored at launch, or swapped in by the toggle.
+    private func makeViewController(folderPath: String, title: String, account: String, mode: BrowseRoute.Mode) -> UIViewController {
+        let vc: UIViewController
+        switch mode {
+        case .browse:
+            vc = makeFolderGrid(folderPath: folderPath, title: title, account: account)
+        case .flat:
+            vc = FlatGalleryViewController(folderPath: folderPath, title: title, account: account, environment: environment, client: client, tab: browseTab, navigator: self)
         }
+        vc.additionalSafeAreaInsets.bottom = GlassTabBar.preferredHeight + 4
+        return vc
     }
 
     private func makeFolderGrid(folderPath: String, title: String, account: String) -> FolderGridViewController {
         let grid = FolderGridViewController(folderPath: folderPath, title: title, account: account, environment: environment, client: client, tab: browseTab, navigator: self)
-        // Subfolders may appear after a load → refresh the Gallery toggle state.
+        // Content settling can change the bar's state (title/count) → refresh it.
         grid.onContentChanged = { [weak self, weak grid] in
             guard let self, self.navController.topViewController === grid else { return }
             self.updateBarState()
@@ -200,23 +232,45 @@ final class BrowseNavController: UIViewController {
 
     // MARK: - Navigation
 
-    private func navigate(to route: BrowseRoute) {
-        browseTab.path.append(route)
+    /// Pushes a new folder level in `mode`, recording it on the tab so it restores.
+    private func push(folderPath: String, title: String, account: String, mode: BrowseRoute.Mode) {
+        browseTab.path.append(BrowseRoute(folderPath: folderPath, title: title, account: account, mode: mode))
         tabsModel.save()
-        navController.pushViewController(makeViewController(forRoot: false, route: route), animated: true)
+        navController.pushViewController(makeViewController(folderPath: folderPath, title: title, account: account, mode: mode), animated: true)
     }
 
-    /// Flattens the current folder into the gallery (only meaningful when a browse
-    /// grid with subfolders is showing — the bar disables the button otherwise).
+    /// Toggles the current level between its folder grid and its flattened gallery,
+    /// swapping the screen *in place* (same stack depth) rather than pushing — so
+    /// tapping Gallery again returns to the previous representation. The mode is
+    /// mirrored into the tab's stored state so it persists and the bar/switcher stay
+    /// correct.
     private func toggleGallery() {
-        guard navController.topViewController is FolderGridViewController else { return }
-        let (path, title, account): (String, String, String)
-        if let last = browseTab.path.last, case .folder(let r) = last {
-            (path, title, account) = (r.folderPath, r.title, r.account)
+        guard !isSwappingPresentation else { return }
+        let depth = navController.viewControllers.count - 1
+        guard depth >= 0 else { return }
+        if depth == 0 {
+            browseTab.rootMode.toggle()
         } else {
-            (path, title, account) = (client.filesRootPath, "Photos", client.credentials.account)
+            browseTab.path[depth - 1].mode.toggle()
         }
-        navigate(to: .flat(FlatGalleryRoute(folderPath: path, title: title, account: account)))
+        tabsModel.save()
+        isSwappingPresentation = true
+        swapTopViewController(with: makeViewController(atDepth: depth))
+    }
+
+    /// Cross-dissolves the top screen to `newTop` without changing stack depth, so the
+    /// back button and the screens beneath are untouched. The floating bar and any
+    /// open viewer are siblings of the nav view, so they stay put through the fade.
+    private func swapTopViewController(with newTop: UIViewController) {
+        var stack = navController.viewControllers
+        guard !stack.isEmpty else { isSwappingPresentation = false; return }
+        stack[stack.count - 1] = newTop
+        UIView.transition(with: navController.view, duration: 0.3, options: [.transitionCrossDissolve, .allowUserInteraction]) {
+            self.navController.setViewControllers(stack, animated: false)
+        } completion: { [weak self] _ in
+            self?.isSwappingPresentation = false
+            self?.updateBarState()
+        }
     }
 
     /// Whether the cached structure says a folder has no subfolders (so it should
@@ -234,15 +288,16 @@ final class BrowseNavController: UIViewController {
 extension BrowseNavController: GalleryNavigator {
     func openFolder(_ route: FolderRoute) {
         Task {
-            if await isLeafFolder(route) {
-                navigate(to: .flat(FlatGalleryRoute(folderPath: route.folderPath, title: route.title, account: route.account)))
-            } else {
-                navigate(to: .folder(route))
-            }
+            // A leaf opens straight into its flattened gallery; the Gallery toggle can
+            // still flip it to a browse grid.
+            let mode: BrowseRoute.Mode = await isLeafFolder(route) ? .flat : .browse
+            push(folderPath: route.folderPath, title: route.title, account: route.account, mode: mode)
         }
     }
 
-    func openFolderInNewTab(_ route: FolderRoute) { tabsModel.open(.folder(route), inNewTab: true) }
+    func openFolderInNewTab(_ route: FolderRoute) {
+        tabsModel.open(BrowseRoute(folderPath: route.folderPath, title: route.title, account: route.account, mode: .browse), inNewTab: true)
+    }
     func openViewer(photos: [PhotoItem], initialID: String, source: (any PhotoViewerTransitionSource)?) {
         browseTab.openViewer(photos: photos, initialID: initialID, source: source)
     }
@@ -251,10 +306,8 @@ extension BrowseNavController: GalleryNavigator {
 // MARK: - UINavigationControllerDelegate
 
 extension BrowseNavController: UINavigationControllerDelegate {
-    func navigationController(_ navigationController: UINavigationController, willShow viewController: UIViewController, animated: Bool) {
-        // Keep content clear of the floating bar.
-        viewController.additionalSafeAreaInsets.bottom = GlassTabBar.preferredHeight + 4
-    }
+    // The bottom-bar safe-area inset is applied per screen in `makeViewController`,
+    // which covers every appearance (push, restore, and the in-place toggle swap).
 
     func navigationController(_ navigationController: UINavigationController, didShow viewController: UIViewController, animated: Bool) {
         // A pop (back button / edge-swipe) leaves fewer VCs than path entries — trim
