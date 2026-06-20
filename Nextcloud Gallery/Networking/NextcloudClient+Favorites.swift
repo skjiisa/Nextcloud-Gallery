@@ -27,4 +27,24 @@ extension NextcloudClient {
             .sorted { $0.date > $1.date }
             .map { GridItemSnapshot(file: $0, account: account) }
     }
+
+    /// Marks the file at `serverPath` (a full Files-DAV URL) as a favorite or not.
+    /// NextcloudKit wants a path relative to the user's Files root, so the root prefix
+    /// is stripped here.
+    func setFavorite(serverPath: String, favorite: Bool) async throws {
+        let result = await NextcloudKit.shared.setFavoriteAsync(
+            fileName: filesRootRelativePath(serverPath),
+            favorite: favorite,
+            account: credentials.account
+        )
+        guard result.error == .success else { throw GalleryError(result.error) }
+    }
+
+    /// Drops the `…/remote.php/dav/files/<userId>/` prefix from a full server path,
+    /// leaving the path NextcloudKit's file APIs expect (it re-adds the prefix).
+    func filesRootRelativePath(_ serverPath: String) -> String {
+        let root = WebDAVPath.normalized(filesRootPath) + "/"
+        let normalized = WebDAVPath.normalized(serverPath)
+        return normalized.hasPrefix(root) ? String(normalized.dropFirst(root.count)) : normalized
+    }
 }

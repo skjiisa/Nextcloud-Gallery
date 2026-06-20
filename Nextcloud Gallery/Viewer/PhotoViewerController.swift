@@ -51,6 +51,15 @@ final class PhotoViewerController: UIViewController {
 
     private let topBar = UINavigationBar()
     private let topItem = UINavigationItem()
+    /// Right-bar action items. Save morphs (icon → spinner → check); the favorite heart
+    /// and the "more" menu (Add to Album / Tags) sit to its left and stay put.
+    private var saveItem: UIBarButtonItem!
+    private var favoriteItem: UIBarButtonItem!
+    private var moreItem: UIBarButtonItem!
+    /// The shown photo's fetched favorite + tags (nil while loading); drives the heart.
+    /// Refreshed on every page change.
+    private var currentMetadata: PhotoMetadata?
+    private var metadataTask: Task<Void, Never>?
     /// The app's bottom tab bar, shown over the viewer (viewer mode: just the tab
     /// pill → switcher, New tab, Settings). Keeps tab context while viewing a photo.
     private let tabBar = GlassTabBar()
@@ -147,6 +156,9 @@ final class PhotoViewerController: UIViewController {
         topBar.translatesAutoresizingMaskIntoConstraints = false
         topItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(doneTapped))
         topBar.items = [topItem]
+
+        favoriteItem = UIBarButtonItem(image: UIImage(systemName: "heart"), style: .plain, target: self, action: #selector(favoriteTapped))
+        moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMoreMenu())
 
         // The app's tab bar. All buttons stay in place (zoom + gallery are disabled
         // via `configure` since there's no grid here — they don't shift), and all
@@ -260,6 +272,7 @@ final class PhotoViewerController: UIViewController {
         topItem.title = currentPhoto?.fileName
         onCurrentPhotoChanged?(currentPhoto)
         configureTabBar()
+        loadMetadata()
     }
 
     /// The viewer's tab bar reflects the *current image's* name (not the active tab's
@@ -565,13 +578,53 @@ final class PhotoViewerController: UIViewController {
         case .saving:
             let spinner = UIActivityIndicatorView(style: .medium)
             spinner.startAnimating()
-            topItem.rightBarButtonItem = UIBarButtonItem(customView: spinner)
+            saveItem = UIBarButtonItem(customView: spinner)
         case .saved:
             let item = UIBarButtonItem(image: UIImage(systemName: "checkmark.circle.fill"), style: .plain, target: nil, action: nil)
             item.tintColor = .systemGreen
-            topItem.rightBarButtonItem = item
+            saveItem = item
         default:
-            topItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.down"), style: .plain, target: self, action: #selector(saveTapped))
+            saveItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.down"), style: .plain, target: self, action: #selector(saveTapped))
+        }
+        refreshRightBarItems()
+    }
+
+    /// `rightBarButtonItems[0]` is the rightmost, so this lays out (left→right) the
+    /// favorite heart, the "more" menu, then the morphing Save button.
+    private func refreshRightBarItems() {
+        topItem.rightBarButtonItems = [saveItem, moreItem, favoriteItem].compactMap { $0 }
+    }
+
+    private func makeMoreMenu() -> UIMenu {
+        let album = UIAction(title: "Add to Album", image: UIImage(systemName: "rectangle.stack.badge.plus")) { [weak self] _ in
+            self?.presentAlbumPicker()
+        }
+        let tags = UIAction(title: "Tags", image: UIImage(systemName: "tag")) { [weak self] _ in
+            self?.presentTagPicker()
+        }
+        return UIMenu(children: [album, tags])
+    }
+
+    /// Updates the heart to match the shown photo's favorite state.
+    private func refreshFavoriteButton() {
+        let isFavorite = currentMetadata?.isFavorite ?? false
+        favoriteItem?.image = UIImage(systemName: isFavorite ? "heart.fill" : "heart")
+        favoriteItem?.tintColor = isFavorite ? .systemRed : nil
+    }
+
+    /// Fetches the shown photo's favorite + tags so the heart reflects real state.
+    /// Cancels any previous fetch; ignores a result if the user has paged on.
+    private func loadMetadata() {
+        metadataTask?.cancel()
+        currentMetadata = nil
+        refreshFavoriteButton()
+        guard let photo = currentPhoto, let client = environment.client else { return }
+        let path = photo.serverPath
+        metadataTask = Task { [weak self] in
+            let meta = try? await client.fileMetadata(serverPath: path)
+            guard let self, !Task.isCancelled, self.currentPhoto?.serverPath == path else { return }
+            self.currentMetadata = meta
+            self.refreshFavoriteButton()
         }
     }
 
@@ -593,6 +646,55 @@ final class PhotoViewerController: UIViewController {
     @objc private func saveTapped() {
         guard let photo = currentPhoto else { return }
         Task { await saver.save(photo: photo, client: environment.client, store: environment.fullImageStore) }
+    }
+
+    /// Toggles the shown photo's favorite state, optimistically (revert on failure).
+    @objc private func favoriteTapped() {
+        guard let photo = currentPhoto, let client = environment.client else { return }
+        let newValue = !(currentMetadata?.isFavorite ?? false)
+        let fileId = currentMetadata?.fileId ?? photo.fileId
+        let tags = currentMetadata?.tags ?? []
+        currentMetadata = PhotoMetadata(fileId: fileId, isFavorite: newValue, tags: tags)
+        refreshFavoriteButton()
+        selectionHaptic.selectionChanged()
+        let path = photo.serverPath
+        Task { [weak self] in
+            do {
+                try await client.setFavorite(serverPath: path, favorite: newValue)
+            } catch {
+                guard let self, self.currentPhoto?.serverPath == path else { return }
+                self.currentMetadata = PhotoMetadata(fileId: fileId, isFavorite: !newValue, tags: tags)
+                self.refreshFavoriteButton()
+                self.presentActionError("Couldn't Update Favorite", error)
+            }
+        }
+    }
+
+    private func presentAlbumPicker() {
+        guard let photo = currentPhoto, let client = environment.client else { return }
+        presentSheet(AlbumPickerViewController(photo: photo, client: client))
+    }
+
+    private func presentTagPicker() {
+        guard let photo = currentPhoto, let client = environment.client else { return }
+        presentSheet(TagPickerViewController(photo: photo, client: client))
+    }
+
+    private func presentSheet(_ root: UIViewController) {
+        let nav = UINavigationController(rootViewController: root)
+        nav.modalPresentationStyle = .pageSheet
+        if let sheet = nav.sheetPresentationController {
+            sheet.detents = [.medium(), .large()]
+            sheet.prefersGrabberVisible = true
+        }
+        present(nav, animated: true)
+    }
+
+    private func presentActionError(_ title: String, _ error: Error) {
+        let message = (error as? GalleryError)?.userMessage ?? error.localizedDescription
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .cancel))
+        present(alert, animated: true)
     }
 }
 

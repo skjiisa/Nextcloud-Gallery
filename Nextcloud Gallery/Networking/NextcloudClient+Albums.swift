@@ -129,20 +129,50 @@ extension NextcloudClient {
         return result.files ?? []
     }
 
+    // MARK: - Writing
+
+    /// Creates a new, empty album.
+    func createAlbum(named name: String) async throws {
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        _ = try await davRequest(method: "MKCOL", urlString: photosAlbumsRoot + encoded)
+    }
+
+    /// Adds the photo at `photoServerPath` (a full Files-DAV URL) to `album`. The
+    /// Photos backend models album membership as a COPY into the album collection — a
+    /// virtual reference, not a second copy of the bytes (and the original is
+    /// untouched). A 409 means it's already there, which is treated as success.
+    func addToAlbum(_ album: Album, photoServerPath: String, fileName: String) async throws {
+        // `copyFileOrFolder` url-encodes both arguments, so build the destination from
+        // the *decoded* album name + file name (not the pre-encoded `album.davPath`).
+        let destination = photosAlbumsRoot + album.name + "/" + fileName
+        let result = await NextcloudKit.shared.copyFileOrFolderAsync(
+            serverUrlFileNameSource: photoServerPath,
+            serverUrlFileNameDestination: destination,
+            overwrite: false,
+            account: credentials.account
+        )
+        guard result.error == .success || result.error.errorCode == 409 else {
+            throw GalleryError(result.error)
+        }
+    }
+
     // MARK: - Raw WebDAV
 
     /// Issues a basic-auth WebDAV request against the photos tree (NextcloudKit can't
-    /// reach it) and returns the response body.
-    private func davRequest(method: String, urlString: String, depth: String, body: String) async throws -> Data {
+    /// reach it) and returns the response body. `depth`/`body` are optional so the same
+    /// helper serves PROPFIND (depth + body) and MKCOL (neither).
+    private func davRequest(method: String, urlString: String, depth: String? = nil, body: String? = nil) async throws -> Data {
         guard let url = URL(string: urlString) else { throw GalleryError.invalidServerURL }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue(depth, forHTTPHeaderField: "Depth")
-        request.setValue("application/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        if let depth { request.setValue(depth, forHTTPHeaderField: "Depth") }
         request.setValue(NextcloudConfig.userAgent, forHTTPHeaderField: "User-Agent")
         let token = Data("\(credentials.user):\(credentials.appPassword)".utf8).base64EncodedString()
         request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
-        request.httpBody = body.data(using: .utf8)
+        if let body {
+            request.setValue("application/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body.data(using: .utf8)
+        }
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw GalleryError.noData }
