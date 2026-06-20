@@ -234,7 +234,7 @@ extension FolderGridViewController: UICollectionViewDelegate, UICollectionViewDa
         collectionView.deselectItem(at: indexPath, animated: false)
         guard let item = dataSource.itemIdentifier(for: indexPath) else { return }
         if item.isDirectory {
-            navigator?.openFolder(FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account))
+            navigator?.openFolder(FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account), mode: nil)
         } else {
             let photos = items.filter { !$0.isDirectory }.map(PhotoItem.init(snapshot:))
             navigator?.openViewer(photos: photos, initialID: item.ocId, source: self)

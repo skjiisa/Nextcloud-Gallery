@@ -12,9 +12,9 @@ import Foundation
 
 @MainActor
 protocol GalleryNavigator: AnyObject {
-    /// Drill into a folder. Folders with no subfolders open straight into the
-    /// flattened gallery (better for images, and browsing is redundant there).
-    func openFolder(_ route: FolderRoute)
+    /// Drill into a folder. `mode` forces the presentation (browse grid / flat gallery);
+    /// pass `nil` to auto-pick (a folder with no subfolders opens flat).
+    func openFolder(_ route: FolderRoute, mode: BrowseRoute.Mode?)
     /// Open a folder in a new background tab and switch to it ("Open in New Tab").
     func openFolderInNewTab(_ route: FolderRoute)
     /// Open the account's Nextcloud favorites as a flat gallery.
@@ -23,6 +23,10 @@ protocol GalleryNavigator: AnyObject {
     func openAlbum(_ album: Album)
     /// Open a flat gallery of files carrying the given system tag.
     func openTag(id: String, name: String)
+    /// Open the grid of all Photos albums (the Albums "See All").
+    func openAllAlbums()
+    /// Open the list of all system tags (the Tags "See All").
+    func openAllTags()
     /// Present the full-screen viewer for `photos`, starting at `initialID`. `source`
     /// supplies the tapped tile's geometry for the grow-open / shrink-close
     /// transition (held weakly; a fade is used if it's gone).

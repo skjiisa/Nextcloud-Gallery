@@ -27,6 +27,10 @@ nonisolated struct BrowseRoute: Hashable, Codable {
         case album
         /// Files carrying a system tag (a flat gallery), at `path` = the tag id.
         case tag
+        /// All Photos albums, in a grid (the Albums "See All").
+        case allAlbums
+        /// All system tags, in a list (the Tags "See All").
+        case allTags
     }
 
     let kind: Kind
@@ -69,5 +73,15 @@ nonisolated struct BrowseRoute: Hashable, Codable {
     /// A tag level (`path` = the tag id).
     static func tag(id: String, name: String, account: String) -> BrowseRoute {
         BrowseRoute(kind: .tag, path: id, title: name, account: account, mode: .flat)
+    }
+
+    /// The "all albums" grid level.
+    static func allAlbums(account: String) -> BrowseRoute {
+        BrowseRoute(kind: .allAlbums, path: "", title: "Albums", account: account, mode: .flat)
+    }
+
+    /// The "all tags" list level.
+    static func allTags(account: String) -> BrowseRoute {
+        BrowseRoute(kind: .allTags, path: "", title: "Tags", account: account, mode: .flat)
     }
 }

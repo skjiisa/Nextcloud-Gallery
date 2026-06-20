@@ -230,7 +230,7 @@ extension RemoteGalleryViewController: UICollectionViewDelegate, UICollectionVie
         collectionView.deselectItem(at: indexPath, animated: false)
         guard let item = dataSource.itemIdentifier(for: indexPath) else { return }
         if item.isDirectory {
-            navigator?.openFolder(FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account))
+            navigator?.openFolder(FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account), mode: nil)
             return
         }
         let photos = items.filter { !$0.isDirectory }.map(PhotoItem.init(snapshot:))

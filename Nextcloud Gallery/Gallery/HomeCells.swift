@@ -4,10 +4,12 @@
 //
 //  Cells and supplementary views for ``HomeViewController``: an album tile (a cover
 //  thumbnail with the album name + photo count over a scrim, mirroring
-//  ``FolderGridCell``) and a section header with an optional trailing action.
+//  ``FolderGridCell``) and a section header with an optional trailing action, plus a
+//  file-browser button card and a tag chip.
 //
 
 import UIKit
+import NextcloudKit
 
 // MARK: - Album tile
 
@@ -157,5 +159,104 @@ private extension UIFont {
             .traits: [UIFontDescriptor.TraitKey.weight: weight]
         ])
         return UIFont(descriptor: descriptor, size: pointSize)
+    }
+}
+
+// MARK: - File-browser button
+
+/// A tappable card with an icon over a short label, used for Home's file-browser row
+/// (open the media folder as a gallery / folder, browse the root, set the media folder).
+final class HomeButtonCell: UICollectionViewCell {
+    static let reuseID = "HomeButtonCell"
+
+    private let iconView = UIImageView()
+    private let label = UILabel()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.backgroundColor = .secondarySystemGroupedBackground
+        contentView.layer.cornerRadius = 14
+        contentView.layer.cornerCurve = .continuous
+
+        iconView.contentMode = .scaleAspectFit
+        iconView.tintColor = .tintColor
+        iconView.preferredSymbolConfiguration = .init(pointSize: 26, weight: .regular)
+        iconView.setContentHuggingPriority(.required, for: .vertical)
+
+        label.font = .preferredFont(forTextStyle: .footnote)
+        label.adjustsFontForContentSizeCategory = true
+        label.textColor = .label
+        label.textAlignment = .center
+        label.numberOfLines = 2
+
+        let stack = UIStackView(arrangedSubviews: [iconView, label])
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -6),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func configure(icon: String, title: String) {
+        iconView.image = UIImage(systemName: icon)
+        label.text = title
+        GalleryTile.applyHoverStyle(to: self, cornerRadius: 14)
+    }
+}
+
+// MARK: - Tag chip
+
+/// A rounded pill carrying a tag's colour dot and name, for Home's Tags strip.
+final class TagChipCell: UICollectionViewCell {
+    static let reuseID = "TagChipCell"
+
+    private let dot = UIView()
+    private let label = UILabel()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.backgroundColor = .secondarySystemGroupedBackground
+        contentView.layer.cornerCurve = .continuous
+
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.layer.cornerRadius = 5
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.adjustsFontForContentSizeCategory = true
+        label.textColor = .label
+        label.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(dot)
+        contentView.addSubview(label)
+        NSLayoutConstraint.activate([
+            dot.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            dot.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            dot.widthAnchor.constraint(equalToConstant: 10),
+            dot.heightAnchor.constraint(equalToConstant: 10),
+            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 7),
+            label.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
+            label.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        contentView.layer.cornerRadius = contentView.bounds.height / 2   // full pill
+    }
+
+    func configure(tag: NKTag) {
+        label.text = tag.name
+        dot.backgroundColor = tag.color.flatMap(UIColor.init(hex:)) ?? .systemGray
+        GalleryTile.applyHoverStyle(to: self, cornerRadius: 18)
     }
 }
