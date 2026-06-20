@@ -168,6 +168,12 @@ final class GlassTabBar: UIView {
         countLabel.setContentHuggingPriority(.required, for: .horizontal)
         countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
+        // Keep the spinner's slot in the pill at all times. Toggling it via alpha (rather
+        // than isHidden, which collapses an arranged subview out of the stack) means
+        // warming starting or stopping never reflows the title and count.
+        spinner.hidesWhenStopped = false
+        spinner.alpha = 0
+
         let stack = UIStackView(arrangedSubviews: [spinner, titleLabel, countLabel])
         stack.spacing = 6
         stack.alignment = .center
@@ -206,8 +212,10 @@ final class GlassTabBar: UIView {
     ) {
         titleLabel.text = title
         countLabel.text = "\(count)"
+        // Visibility only — the slot is always reserved (see buildPill), so this never
+        // shifts the title/count.
         if isWarming { spinner.startAnimating() } else { spinner.stopAnimating() }
-        spinner.isHidden = !isWarming
+        spinner.alpha = isWarming ? 1 : 0
         galleryButton.isEnabled = galleryEnabled
         // The Gallery button is a toggle: filled while the flattened gallery is
         // showing (tap to return to folders), hollow while browsing folders.
