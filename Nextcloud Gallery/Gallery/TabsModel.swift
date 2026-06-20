@@ -25,7 +25,9 @@ final class TabsModel {
     /// would defeat the per-frame render skipping that keeps swiping smooth).
     var isShowingSettings = false
 
-    private static let storageKey = "openTabs.v1"
+    // Bumped to v2 when levels gained a presentation mode (browse/flat); v1 tabs
+    // can't decode and are dropped, leaving one fresh tab on first launch.
+    private static let storageKey = "openTabs.v2"
 
     init() {
         let restoredTabs: [BrowseTab]

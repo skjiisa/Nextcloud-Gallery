@@ -189,6 +189,14 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
     }
 
+    func carouselDragCancelled() {
+        guard isDragging else { return }
+        // Snap straight back to the active tab — no animation — so the screen is at
+        // rest the instant the caller snapshots it for the switcher.
+        isDragging = false
+        rebuildActive()
+    }
+
     // MARK: - Modal reconciliation
 
     private func topmostPresenter() -> UIViewController {
