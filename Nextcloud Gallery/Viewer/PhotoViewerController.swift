@@ -156,8 +156,13 @@ final class PhotoViewerController: UIViewController {
         tabBar.onShowTabs = { [weak self] in self?.tabs.openSwitcher() }
         tabBar.onNewTab = { [weak self] in self?.tabs.newTab() }
         tabBar.onSettings = { [weak self] in self?.tabs.isShowingSettings = true }
+        // The viewer is always the active tab's, so its tab actions target that tab.
+        tabBar.onCloseTab = { [weak self] in guard let self else { return }; tabs.closeTab(tabs.activeTabID) }
+        tabBar.onCloseOtherTabs = { [weak self] in guard let self else { return }; tabs.closeOtherTabs(keeping: tabs.activeTabID) }
+        tabBar.onNextTab = { [weak self] in self?.tabs.selectNext() }
+        tabBar.onPrevTab = { [weak self] in self?.tabs.selectPrevious() }
         tabBar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
-        tabBar.onDragEnded = { [weak self] tx in self?.dragHandler?.carouselDragEnded(translation: tx) }
+        tabBar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
         tabBar.onDragCancelled = { [weak self] in self?.dragHandler?.carouselDragCancelled() }
 
         view.addSubview(tabBar)

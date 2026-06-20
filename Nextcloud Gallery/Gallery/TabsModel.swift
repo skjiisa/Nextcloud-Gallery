@@ -106,6 +106,33 @@ final class TabsModel {
         save()
     }
 
+    /// Selects the next tab to the right, clamped at the last one (no wrap, to match
+    /// the carousel). No-op at the boundary.
+    func selectNext() {
+        let i = activeIndex
+        guard tabs.indices.contains(i + 1) else { return }
+        activeTabID = tabs[i + 1].id
+        save()
+    }
+
+    /// Selects the previous tab to the left, clamped at the first one. No-op at the
+    /// boundary.
+    func selectPrevious() {
+        let i = activeIndex
+        guard tabs.indices.contains(i - 1) else { return }
+        activeTabID = tabs[i - 1].id
+        save()
+    }
+
+    /// Closes every tab except `id`, which becomes the sole, active tab. No-op if `id`
+    /// isn't a member.
+    func closeOtherTabs(keeping id: BrowseTab.ID) {
+        guard let keep = tabs.first(where: { $0.id == id }) else { return }
+        tabs = [keep]
+        activeTabID = keep.id
+        save()
+    }
+
     /// Opens the switcher, first refreshing the live tab's card so it shows what
     /// the user was just looking at.
     func openSwitcher() {

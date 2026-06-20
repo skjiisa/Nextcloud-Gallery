@@ -23,7 +23,9 @@ import UIKit
 @MainActor
 protocol CarouselDragHandling: AnyObject {
     func carouselDragChanged(translation: CGFloat)
-    func carouselDragEnded(translation: CGFloat)
+    /// `velocity` is the finger's horizontal speed (pts/sec) at release, so a quick
+    /// flick can switch tabs on little travel and carry its momentum into the snap.
+    func carouselDragEnded(translation: CGFloat, velocity: CGFloat)
     /// Abandon an in-flight drag and re-center the active tab *immediately*, with no
     /// snap animation — used when a drag resolves to opening the switcher, so the live
     /// screen is at rest before its card snapshot is captured.
@@ -152,8 +154,12 @@ final class BrowseNavController: UIViewController {
         bar.onNewTab = { [weak self] in self?.tabsModel.newTab() }
         bar.onSettings = { [weak self] in self?.tabsModel.isShowingSettings = true }
         bar.onShowTabs = { [weak self] in self?.tabsModel.openSwitcher() }
+        bar.onCloseTab = { [weak self] in guard let self else { return }; tabsModel.closeTab(browseTab.id) }
+        bar.onCloseOtherTabs = { [weak self] in guard let self else { return }; tabsModel.closeOtherTabs(keeping: browseTab.id) }
+        bar.onNextTab = { [weak self] in self?.tabsModel.selectNext() }
+        bar.onPrevTab = { [weak self] in self?.tabsModel.selectPrevious() }
         bar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
-        bar.onDragEnded = { [weak self] tx in self?.dragHandler?.carouselDragEnded(translation: tx) }
+        bar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
         bar.onDragCancelled = { [weak self] in self?.dragHandler?.carouselDragCancelled() }
         view.addSubview(bar)
         NSLayoutConstraint.activate([
