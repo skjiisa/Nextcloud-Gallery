@@ -27,6 +27,9 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     private var mountedIDs: Set<UUID> = []
 
     private var isDragging = false
+    /// Where the finger left the carousel when a drag resolves to opening the switcher,
+    /// held between `carouselParkForSnapshot` and `carouselBounceToActive`.
+    private var parkedOffset: CGAffineTransform = .identity
     private let peekGap: CGFloat = 16
     private var pageWidth: CGFloat { view.bounds.width }
     private var slot: CGFloat { pageWidth + peekGap }
@@ -203,12 +206,26 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
     }
 
-    func carouselDragCancelled() {
+    func carouselParkForSnapshot() {
         guard isDragging else { return }
-        // Snap straight back to the active tab — no animation — so the screen is at
-        // rest the instant the caller snapshots it for the switcher.
-        isDragging = false
-        rebuildActive()
+        // Stash where the finger left the carousel, then sit at rest so the snapshot
+        // the caller is about to take is clean (mounted neighbours are parked off-screen
+        // at ±slot, so only the active tab shows).
+        parkedOffset = container.transform
+        container.transform = .identity
+    }
+
+    func carouselBounceToActive() {
+        guard isDragging else { return }
+        // Restore the finger's last position (no frame was drawn at the parked identity,
+        // so this doesn't jump) and spring home — the bounce the snapshot couldn't show.
+        container.transform = parkedOffset
+        animateSnap(initialVelocity: 0) {
+            self.container.transform = .identity
+        } completion: {
+            self.isDragging = false
+            self.rebuildActive()
+        }
     }
 
     /// Runs the carousel's snap-into-place animation, honouring Reduce Motion (a short

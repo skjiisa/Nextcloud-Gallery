@@ -37,6 +37,9 @@ final class GlassTabBar: UIView {
     var onNewTab: (() -> Void)?
     var onSettings: (() -> Void)?
     var onShowTabs: (() -> Void)?
+    /// Lock / unlock the open photo's zoom (viewer only — the lock button replaces the
+    /// gallery button there).
+    var onLockToggle: (() -> Void)?
     // Tab management — reached via the pill's long-press menu and VoiceOver actions.
     var onCloseTab: (() -> Void)?
     var onCloseOtherTabs: (() -> Void)?
@@ -46,10 +49,13 @@ final class GlassTabBar: UIView {
     /// `(translation, velocity)` of the horizontal drag at release, in window points /
     /// pts-per-sec, so the carousel can flick-switch and continue the momentum.
     var onDragEnded: ((CGFloat, CGFloat) -> Void)?
-    /// Reset the carousel to the active tab *immediately* (no snap animation). Used
-    /// when a drag resolves to opening the switcher: the live screen must be back at
-    /// rest before its card snapshot is taken.
-    var onDragCancelled: (() -> Void)?
+    /// When a drag resolves to opening the switcher: park the carousel at the active
+    /// tab *instantly* so the card snapshot is clean, remembering where the finger
+    /// left it. Paired with `onBounceToRest`.
+    var onParkForSnapshot: (() -> Void)?
+    /// Spring the carousel from where the finger left it back to the active tab, so the
+    /// reset reads as a bounce rather than a pop. Runs right after the snapshot.
+    var onBounceToRest: (() -> Void)?
 
     static let preferredHeight: CGFloat = 56
 
@@ -57,6 +63,9 @@ final class GlassTabBar: UIView {
     private let zoomOutButton = GlassTabBar.iconButton("minus.magnifyingglass", accessibility: "Zoom Out")
     private let zoomInButton = GlassTabBar.iconButton("plus.magnifyingglass", accessibility: "Zoom In")
     private let galleryButton = GlassTabBar.iconButton("square.grid.3x3", accessibility: "Gallery")
+    // Sits in the gallery button's slot and shows only in the photo viewer (gallery
+    // hidden), toggling the open photo's locked zoom.
+    private let lockButton = GlassTabBar.iconButton("lock.open", accessibility: "Lock Zoom")
     private let newTabButton = GlassTabBar.iconButton("plus", accessibility: "New Tab")
     private let settingsButton = GlassTabBar.iconButton("gearshape", accessibility: "Settings")
 
@@ -74,7 +83,7 @@ final class GlassTabBar: UIView {
     // near-vertical swipe doesn't needlessly mount neighbour pages).
     private var carouselEngaged = false
     private static let carouselSlop: CGFloat = 10
-    private let liftThreshold: CGFloat = 56
+    private let liftThreshold: CGFloat = 72
     private let maxLift: CGFloat = 92
     private var hapticArmed = false
     private let haptic = UIImpactFeedbackGenerator(style: .medium)
@@ -109,18 +118,20 @@ final class GlassTabBar: UIView {
         zoomOutButton.addTarget(self, action: #selector(zoomOutTapped), for: .touchUpInside)
         zoomInButton.addTarget(self, action: #selector(zoomInTapped), for: .touchUpInside)
         galleryButton.addTarget(self, action: #selector(galleryTapped), for: .touchUpInside)
+        lockButton.addTarget(self, action: #selector(lockTapped), for: .touchUpInside)
+        lockButton.isHidden = true   // viewer-only; shown via `configure(lockVisible:)`
         newTabButton.addTarget(self, action: #selector(newTabTapped), for: .touchUpInside)
         settingsButton.addTarget(self, action: #selector(settingsTapped), for: .touchUpInside)
 
         buildPill()
 
-        let row = UIStackView(arrangedSubviews: [zoomOutButton, zoomInButton, pill, galleryButton, newTabButton, settingsButton])
+        let row = UIStackView(arrangedSubviews: [zoomOutButton, zoomInButton, pill, galleryButton, lockButton, newTabButton, settingsButton])
         row.axis = .horizontal
         row.alignment = .fill
         row.spacing = 2
         row.translatesAutoresizingMaskIntoConstraints = false
         pill.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        for button in [zoomOutButton, zoomInButton, galleryButton, newTabButton, settingsButton] {
+        for button in [zoomOutButton, zoomInButton, galleryButton, lockButton, newTabButton, settingsButton] {
             button.setContentHuggingPriority(.required, for: .horizontal)
             button.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
@@ -186,7 +197,12 @@ final class GlassTabBar: UIView {
         galleryEnabled: Bool,
         galleryActive: Bool,
         canZoomIn: Bool,
-        canZoomOut: Bool
+        canZoomOut: Bool,
+        // Viewer-only: when `lockVisible`, the lock button takes the gallery button's
+        // place and reflects whether the open photo's zoom is locked.
+        lockVisible: Bool = false,
+        lockEnabled: Bool = false,
+        lockActive: Bool = false
     ) {
         titleLabel.text = title
         countLabel.text = "\(count)"
@@ -198,6 +214,15 @@ final class GlassTabBar: UIView {
         let gallerySymbol = galleryActive ? "square.grid.3x3.fill" : "square.grid.3x3"
         galleryButton.setImage(UIImage(systemName: gallerySymbol, withConfiguration: UIImage.SymbolConfiguration(textStyle: .body)), for: .normal)
         galleryButton.accessibilityLabel = galleryActive ? "Exit Gallery" : "Gallery"
+        // Gallery and lock share the slot: only one shows at a time.
+        galleryButton.isHidden = lockVisible
+        lockButton.isHidden = !lockVisible
+        if lockVisible {
+            let lockSymbol = lockActive ? "lock.fill" : "lock.open"
+            lockButton.setImage(UIImage(systemName: lockSymbol, withConfiguration: UIImage.SymbolConfiguration(textStyle: .body)), for: .normal)
+            lockButton.isEnabled = lockEnabled
+            lockButton.accessibilityLabel = lockActive ? "Unlock Zoom" : "Lock Zoom"
+        }
         zoomInButton.isEnabled = canZoomIn
         zoomOutButton.isEnabled = canZoomOut
         tabCount = count
@@ -230,6 +255,7 @@ final class GlassTabBar: UIView {
     @objc private func zoomOutTapped() { onZoomOut?() }
     @objc private func zoomInTapped() { onZoomIn?() }
     @objc private func galleryTapped() { onGalleryToggle?() }
+    @objc private func lockTapped() { onLockToggle?() }
     @objc private func newTabTapped() { onNewTab?() }
     @objc private func settingsTapped() { onSettings?() }
     @objc private func pillTapped() { onShowTabs?() }
@@ -283,12 +309,19 @@ final class GlassTabBar: UIView {
             // Up-swipe (or up-flick) wins.
             if projUp >= liftThreshold {
                 // Open the switcher. A flick may not have armed the predictive bump, so
-                // fire it now. Snap the live surfaces back to rest *first* so the tab's
-                // card snapshot (taken in `onShowTabs`) isn't caught mid-drag.
+                // fire it now.
                 if !hapticArmed { haptic.impactOccurred() }
-                onDragCancelled?()
+                // Park the bar and carousel at rest just long enough to take a clean
+                // card snapshot — this whole block runs in one turn of the run loop, so
+                // no in-between frame is ever drawn — then let both BOUNCE home from
+                // where the finger left them instead of popping.
+                let lifted = transform
                 transform = .identity
-                onShowTabs?()
+                onParkForSnapshot?()
+                onShowTabs?()           // captures the card, then presents the switcher
+                transform = lifted
+                springBarDown()
+                onBounceToRest?()
             } else {
                 springBarDown()
                 onDragEnded?(0, 0)   // settle the carousel back on the active tab

@@ -26,10 +26,12 @@ protocol CarouselDragHandling: AnyObject {
     /// `velocity` is the finger's horizontal speed (pts/sec) at release, so a quick
     /// flick can switch tabs on little travel and carry its momentum into the snap.
     func carouselDragEnded(translation: CGFloat, velocity: CGFloat)
-    /// Abandon an in-flight drag and re-center the active tab *immediately*, with no
-    /// snap animation — used when a drag resolves to opening the switcher, so the live
-    /// screen is at rest before its card snapshot is captured.
-    func carouselDragCancelled()
+    /// Park the carousel at the active tab *immediately* (no animation) so a card
+    /// snapshot taken now is clean, remembering where the finger left it.
+    func carouselParkForSnapshot()
+    /// Spring the carousel from the parked position back to the active tab, so a drag
+    /// that opens the switcher bounces home instead of popping. Pairs with the above.
+    func carouselBounceToActive()
 }
 
 final class BrowseNavController: UIViewController {
@@ -160,7 +162,8 @@ final class BrowseNavController: UIViewController {
         bar.onPrevTab = { [weak self] in self?.tabsModel.selectPrevious() }
         bar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
         bar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
-        bar.onDragCancelled = { [weak self] in self?.dragHandler?.carouselDragCancelled() }
+        bar.onParkForSnapshot = { [weak self] in self?.dragHandler?.carouselParkForSnapshot() }
+        bar.onBounceToRest = { [weak self] in self?.dragHandler?.carouselBounceToActive() }
         view.addSubview(bar)
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),

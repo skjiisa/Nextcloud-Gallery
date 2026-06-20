@@ -161,9 +161,11 @@ final class PhotoViewerController: UIViewController {
         tabBar.onCloseOtherTabs = { [weak self] in guard let self else { return }; tabs.closeOtherTabs(keeping: tabs.activeTabID) }
         tabBar.onNextTab = { [weak self] in self?.tabs.selectNext() }
         tabBar.onPrevTab = { [weak self] in self?.tabs.selectPrevious() }
+        tabBar.onLockToggle = { [weak self] in self?.toggleZoomLock() }
         tabBar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
         tabBar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
-        tabBar.onDragCancelled = { [weak self] in self?.dragHandler?.carouselDragCancelled() }
+        tabBar.onParkForSnapshot = { [weak self] in self?.dragHandler?.carouselParkForSnapshot() }
+        tabBar.onBounceToRest = { [weak self] in self?.dragHandler?.carouselBounceToActive() }
 
         view.addSubview(tabBar)
         view.addSubview(topBar)
@@ -216,6 +218,8 @@ final class PhotoViewerController: UIViewController {
         let page = PhotoPageViewController(photo: photos[index], environment: environment)
         page.onZoomChanged = { [weak self] zoomed in
             self?.pagingScrollView?.isScrollEnabled = !zoomed
+            // Zooming in/out flips whether there's a zoom to lock — refresh the button.
+            self?.configureTabBar()
         }
         page.onImageChanged = { [weak self] image in self?.onCurrentImageUpgrade?(image) }
         return page
@@ -263,10 +267,34 @@ final class PhotoViewerController: UIViewController {
     /// the tab title follows the open photo. Count + warming come from the model.
     private func configureTabBar() {
         let warming = environment.warmingCoordinator?.state == .warming
+        // The lock button replaces the gallery button here: it's lit when the photo's
+        // zoom is locked, and only tappable once there's a zoom worth locking (or a
+        // lock to clear).
+        let locked = currentPhoto.map { environment.zoomLockStore.isLocked($0.id) } ?? false
+        let zoomed = currentPageVC?.isZoomed ?? false
         tabBar.configure(
             title: currentPhoto?.fileName ?? "", count: tabs.tabs.count, isWarming: warming,
-            galleryEnabled: false, galleryActive: false, canZoomIn: false, canZoomOut: false
+            galleryEnabled: false, galleryActive: false, canZoomIn: false, canZoomOut: false,
+            lockVisible: true, lockEnabled: zoomed || locked, lockActive: locked
         )
+    }
+
+    /// Locks the current photo's zoom + pan so it reopens reframed, or clears that lock
+    /// if it's already set. Locking needs a zoomed-in photo (the button is disabled at
+    /// fit scale); reopening the photo restores it (see ``PhotoPageViewController``).
+    private func toggleZoomLock() {
+        guard let photo = currentPhoto else { return }
+        let store = environment.zoomLockStore
+        if store.isLocked(photo.id) {
+            store.removeLock(for: photo.id)
+            currentPageVC?.clearLock()
+        } else if let lock = currentPageVC?.currentLock {
+            store.setLock(lock, for: photo.id)
+            // Adopt it live so the current zoom immediately becomes the new baseline.
+            currentPageVC?.applyLock(lock)
+        }
+        selectionHaptic.selectionChanged()
+        configureTabBar()
     }
 
     // MARK: - Chrome
@@ -309,7 +337,10 @@ final class PhotoViewerController: UIViewController {
         let heroImage = source?.viewerSourceImage(forPhotoID: id) ?? currentDisplayedImage
         let sourceFrame = source?.viewerSourceFrame(forPhotoID: id, in: view)
         let aspect = heroImage.map { $0.size.height > 0 ? $0.size.width / $0.size.height : 1 } ?? currentAspectRatio
-        let endFrame = fittedRect(forAspectRatio: aspect)
+        // A locked photo grows straight to its locked framing (not fit-then-pop): the
+        // hero lands on the same zoomed crop the restored page settles to underneath.
+        let fitFrame = fittedRect(forAspectRatio: aspect)
+        let endFrame = environment.zoomLockStore.lock(for: id).map { lockedDisplayRect(fit: fitFrame, lock: $0) } ?? fitFrame
 
         backdropView.alpha = 0
         setChromeAlpha(0)
@@ -338,6 +369,9 @@ final class PhotoViewerController: UIViewController {
         } completion: { _ in
             self.onCurrentImageUpgrade = nil
             hero.removeFromSuperview()
+            // Make sure the page has settled to its (possibly locked) framing before it
+            // shows, so it matches the hero's final frame instead of popping into place.
+            self.currentPageVC?.view.layoutIfNeeded()
             self.setPageContentHidden(false)
             self.source?.setViewerSourceHidden(false, forPhotoID: id)
         }
@@ -501,6 +535,15 @@ final class PhotoViewerController: UIViewController {
             width = height * aspect
         }
         return CGRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
+    }
+
+    /// Where the full image sits on screen at a locked zoom: the fit rect scaled by the
+    /// lock's scale and shifted by its pan, so the viewport crops to the locked framing.
+    /// (Inverse of `ZoomableImageScrollView`'s scale + content-offset.)
+    private func lockedDisplayRect(fit: CGRect, lock: ZoomLock) -> CGRect {
+        CGRect(x: fit.minX * lock.scale - lock.offset.x,
+               y: fit.minY * lock.scale - lock.offset.y,
+               width: fit.width * lock.scale, height: fit.height * lock.scale)
     }
 
     func setPageContentHidden(_ hidden: Bool) {
