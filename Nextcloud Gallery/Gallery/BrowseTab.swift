@@ -35,11 +35,6 @@ final class BrowseTab: Identifiable {
     /// the tab's `NavigationStack`; persisted to restore the tab on next launch.
     var path: [BrowseRoute]
 
-    /// Presentation mode of the root "Photos" level. Deeper levels carry their own
-    /// ``BrowseRoute/mode``; the root has no route entry, so its mode lives here.
-    /// Flipped in place by the bottom bar's Gallery toggle.
-    var rootMode: BrowseRoute.Mode
-
     // Per-tab flattened-gallery appearance. These used to be global `@AppStorage`;
     // moving them here lets one tab sort by date while another sorts by folder.
     var sort: GallerySortOrder
@@ -67,23 +62,21 @@ final class BrowseTab: Identifiable {
     init(
         id: UUID = UUID(),
         path: [BrowseRoute] = [],
-        rootMode: BrowseRoute.Mode = .browse,
         sort: GallerySortOrder = .newestFirst,
         zoom: GalleryGridZoom = .medium,
         aspectFill: Bool = true
     ) {
         self.id = id
         self.path = path
-        self.rootMode = rootMode
         self.sort = sort
         self.zoom = zoom
         self.aspectFill = aspectFill
     }
 
     /// The tab's label (bar pill + switcher card): the open photo's name when a photo
-    /// is full-screened, otherwise the deepest screen's title, or "Photos" at the root.
+    /// is full-screened, otherwise the deepest screen's title, or "Home" at the root.
     var title: String {
-        viewerTitle ?? path.last?.title ?? "Photos"
+        viewerTitle ?? path.last?.title ?? "Home"
     }
 
     /// Opens `photo` full-screen, paging across `photos`. `source` is the grid that
@@ -102,21 +95,19 @@ extension BrowseTab {
     nonisolated struct Persisted: Codable {
         var id: UUID
         var path: [BrowseRoute]
-        var rootMode: BrowseRoute.Mode
         var sort: GallerySortOrder
         var zoom: GalleryGridZoom
         var aspectFill: Bool
     }
 
     var persisted: Persisted {
-        Persisted(id: id, path: path, rootMode: rootMode, sort: sort, zoom: zoom, aspectFill: aspectFill)
+        Persisted(id: id, path: path, sort: sort, zoom: zoom, aspectFill: aspectFill)
     }
 
     convenience init(persisted: Persisted) {
         self.init(
             id: persisted.id,
             path: persisted.path,
-            rootMode: persisted.rootMode,
             sort: persisted.sort,
             zoom: persisted.zoom,
             aspectFill: persisted.aspectFill

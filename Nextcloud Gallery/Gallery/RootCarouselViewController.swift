@@ -267,11 +267,28 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     private func syncSettings(_ show: Bool) {
         if show, settingsVC == nil {
             let settings = UINavigationController(rootViewController: SettingsViewController(environment: environment, tabs: tabs))
+            // Observe interactive (swipe-down) dismissal so the flag gets reset — see
+            // the delegate below.
+            settings.presentationController?.delegate = self
             settingsVC = settings
             topmostPresenter().present(settings, animated: true)
         } else if !show, let settings = settingsVC {
             settingsVC = nil
             settings.dismiss(animated: true)
         }
+    }
+}
+
+// MARK: - UIAdaptivePresentationControllerDelegate
+
+extension RootCarouselViewController: UIAdaptivePresentationControllerDelegate {
+    /// The Settings sheet was swiped down to dismiss. Interactive dismissal bypasses our
+    /// programmatic teardown, so reset the observed flag and cached controller here —
+    /// otherwise `isShowingSettings` stays `true` and the bottom bar's gear (which only
+    /// sets it `true`) appears dead for the rest of the launch.
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        guard presentationController.presentedViewController === settingsVC else { return }
+        settingsVC = nil
+        tabs.isShowingSettings = false
     }
 }
