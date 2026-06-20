@@ -30,7 +30,11 @@ final class TabsModel {
     // can't decode and are dropped, leaving one fresh tab at Home on first launch.
     private static let storageKey = "openTabs.v3"
 
-    init() {
+    /// The signed-in account's client, used to build a `.files` new tab's destination.
+    private let client: NextcloudClient
+
+    init(client: NextcloudClient) {
+        self.client = client
         let restoredTabs: [BrowseTab]
         let active: BrowseTab.ID
         if let restored = Self.loadPersisted(), !restored.tabs.isEmpty {
@@ -59,14 +63,31 @@ final class TabsModel {
 
     // MARK: - Lifecycle
 
-    /// Opens a fresh tab at the Files root and makes it active.
+    /// Opens a fresh tab honoring the "new tab opens to" preference and makes it
+    /// active. Every option keeps Home as the tab's root level, so the user can always
+    /// navigate back — including `.current`, which duplicates the active tab's whole
+    /// stack (and appearance) so the new tab opens where they were with that history.
     @discardableResult
     func newTab() -> BrowseTab {
-        let tab = BrowseTab()
+        let tab: BrowseTab
+        switch NewTabDestination.preference {
+        case .home:
+            tab = BrowseTab()
+        case .files:
+            tab = BrowseTab(path: [filesRootRoute])
+        case .current:
+            let source = activeTab
+            tab = BrowseTab(path: source.path, sort: source.sort, zoom: source.zoom, aspectFill: source.aspectFill)
+        }
         tabs.append(tab)
         activeTabID = tab.id
         save()
         return tab
+    }
+
+    /// The Files-root level a `.files` new tab pushes above Home.
+    private var filesRootRoute: BrowseRoute {
+        .folder(path: client.filesRootPath, title: "Files", account: client.credentials.account, mode: .browse)
     }
 
     /// Opens `route` (a folder or flattened gallery) in a new background-free tab

@@ -30,46 +30,74 @@ final class SettingsViewController: UITableViewController {
 
     // MARK: - Table
 
-    override func numberOfSections(in tableView: UITableView) -> Int { 2 }
+    private enum Section: Int, CaseIterable {
+        case newTab, clearCache, signOut
+    }
 
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { 1 }
+    override func numberOfSections(in tableView: UITableView) -> Int { Section.allCases.count }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        Section(rawValue: section) == .newTab ? NewTabDestination.allCases.count : 1
+    }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        Section(rawValue: section) == .newTab ? "New Tab Opens To" : nil
+    }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         var content = cell.defaultContentConfiguration()
-        content.textProperties.color = .systemRed
 
-        if indexPath.section == 0 {
+        switch Section(rawValue: indexPath.section)! {
+        case .newTab:
+            let destination = NewTabDestination.allCases[indexPath.row]
+            content.text = destination.label
+            content.image = UIImage(systemName: destination.symbol)
+            cell.accessoryType = destination == NewTabDestination.preference ? .checkmark : .none
+            cell.selectionStyle = .default
+        case .clearCache:
             content.text = "Clear Local Cache"
             content.image = UIImage(systemName: "trash")
+            content.textProperties.color = .systemRed
             content.imageProperties.tintColor = .systemRed
             if isClearing {
                 let spinner = UIActivityIndicatorView(style: .medium)
                 spinner.startAnimating()
                 cell.accessoryView = spinner
             }
-        } else {
+            cell.selectionStyle = isClearing ? .none : .default
+        case .signOut:
             content.text = "Sign Out"
             content.image = UIImage(systemName: "rectangle.portrait.and.arrow.right")
+            content.textProperties.color = .systemRed
             content.imageProperties.tintColor = .systemRed
         }
+
         cell.contentConfiguration = content
-        cell.selectionStyle = isClearing ? .none : .default
         return cell
     }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        section == 0
-            ? "Deletes the cached folder structure, thumbnails, and downloaded photos from this device. You'll stay signed in, and your library re-downloads as you browse."
-            : nil
+        switch Section(rawValue: section)! {
+        case .newTab:
+            return "“Current Location” opens new tabs with a copy of your current navigation, so you can still go back."
+        case .clearCache:
+            return "Deletes the cached folder structure, thumbnails, and downloaded photos from this device. You'll stay signed in, and your library re-downloads as you browse."
+        case .signOut:
+            return nil
+        }
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard !isClearing else { return }
-        if indexPath.section == 0 {
+        switch Section(rawValue: indexPath.section)! {
+        case .newTab:
+            NewTabDestination.preference = NewTabDestination.allCases[indexPath.row]
+            tableView.reloadSections(IndexSet(integer: indexPath.section), with: .none)
+        case .clearCache:
             confirmClearCache()
-        } else {
+        case .signOut:
             environment.signOut()
             tabs.isShowingSettings = false
         }
@@ -93,7 +121,7 @@ final class SettingsViewController: UITableViewController {
         })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         // iPad: anchor the action sheet to the row.
-        if let popover = sheet.popoverPresentationController, let cell = tableView.cellForRow(at: IndexPath(row: 0, section: 0)) {
+        if let popover = sheet.popoverPresentationController, let cell = tableView.cellForRow(at: IndexPath(row: 0, section: Section.clearCache.rawValue)) {
             popover.sourceView = cell
             popover.sourceRect = cell.bounds
         }

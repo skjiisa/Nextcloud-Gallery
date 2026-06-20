@@ -43,7 +43,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         if signedIn, let client = environment.client {
             if window.rootViewController is RootCarouselViewController { return }
-            let tabs = self.tabs ?? TabsModel()
+            let tabs = self.tabs ?? TabsModel(client: client)
             self.tabs = tabs
             setRoot(RootCarouselViewController(environment: environment, tabs: tabs, client: client), animated: animated)
         } else {
