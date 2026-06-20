@@ -25,9 +25,10 @@ final class TabsModel {
     /// would defeat the per-frame render skipping that keeps swiping smooth).
     var isShowingSettings = false
 
-    // Bumped to v2 when levels gained a presentation mode (browse/flat); v1 tabs
-    // can't decode and are dropped, leaving one fresh tab on first launch.
-    private static let storageKey = "openTabs.v2"
+    // Bumped to v3 when the root became Home (not the Files folder): levels gained a
+    // `kind` (folder/favorites/album) and the tab dropped its `rootMode`. Older saves
+    // can't decode and are dropped, leaving one fresh tab at Home on first launch.
+    private static let storageKey = "openTabs.v3"
 
     init() {
         let restoredTabs: [BrowseTab]

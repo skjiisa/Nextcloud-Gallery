@@ -2,8 +2,8 @@
 //  BrowseNavController.swift
 //  Nextcloud Gallery
 //
-//  One tab's page. Hosts a child ``UINavigationController`` (rooted at the Files-root
-//  folder grid) with the tab's Liquid Glass bottom bar — and, when a photo is open,
+//  One tab's page. Hosts a child ``UINavigationController`` (rooted at the Home hub)
+//  with the tab's Liquid Glass bottom bar — and, when a photo is open,
 //  the photo viewer — floating *above* the nav as siblings. It is deliberately a plain
 //  view controller wrapping a nav controller rather than a `UINavigationController`
 //  subclass: a `UINavigationController` re-manages the subviews of its own view (it
@@ -61,8 +61,8 @@ final class BrowseNavController: UIViewController {
         self.dragHandler = dragHandler
         super.init(nibName: nil, bundle: nil)
 
-        // Build the VC stack: one screen per level (Files-root + each persisted
-        // route), each in its stored presentation mode.
+        // Build the VC stack: the Home hub plus one screen per persisted route, each
+        // in its stored presentation mode.
         let stack = (0...browseTab.path.count).map { makeViewController(atDepth: $0) }
         navController.setViewControllers(stack, animated: false)
         navController.delegate = self
@@ -198,32 +198,42 @@ final class BrowseNavController: UIViewController {
 
     // MARK: - Destinations
 
-    /// The folder shown at stack `depth` (0 == the Files-root "Photos" level), with
-    /// its current presentation mode. The root has no route entry, so its mode lives
-    /// on the tab; deeper levels carry their own.
-    private func location(atDepth depth: Int) -> (folderPath: String, title: String, account: String, mode: BrowseRoute.Mode) {
-        if depth <= 0 {
-            return (client.filesRootPath, "Photos", client.credentials.account, browseTab.rootMode)
-        }
-        let route = browseTab.path[depth - 1]
-        return (route.folderPath, route.title, route.account, route.mode)
-    }
-
+    /// The screen at stack `depth`: depth 0 is the always-present Home hub (it has no
+    /// route entry — see ``BrowseTab/path``); deeper levels are built from their route.
     private func makeViewController(atDepth depth: Int) -> UIViewController {
-        let l = location(atDepth: depth)
-        return makeViewController(folderPath: l.folderPath, title: l.title, account: l.account, mode: l.mode)
+        depth <= 0 ? makeHomeViewController() : makeViewController(for: browseTab.path[depth - 1])
     }
 
-    /// Builds a folder's screen in the given presentation mode, pre-set with the
-    /// bottom bar's safe-area inset so content clears the floating bar however the
-    /// screen arrives — pushed, restored at launch, or swapped in by the toggle.
-    private func makeViewController(folderPath: String, title: String, account: String, mode: BrowseRoute.Mode) -> UIViewController {
+    private func makeHomeViewController() -> UIViewController {
+        let home = HomeViewController(environment: environment, client: client, navigator: self)
+        home.additionalSafeAreaInsets.bottom = GlassTabBar.preferredHeight + 4
+        return home
+    }
+
+    /// Builds a pushed level's screen, pre-set with the bottom bar's safe-area inset so
+    /// content clears the floating bar however the screen arrives — pushed, restored at
+    /// launch, or swapped in by the Gallery toggle. Folder levels honour their
+    /// browse/flat mode; favorites and albums are always one flat gallery fed by a live
+    /// fetch.
+    private func makeViewController(for route: BrowseRoute) -> UIViewController {
         let vc: UIViewController
-        switch mode {
-        case .browse:
-            vc = makeFolderGrid(folderPath: folderPath, title: title, account: account)
-        case .flat:
-            vc = FlatGalleryViewController(folderPath: folderPath, title: title, account: account, environment: environment, client: client, tab: browseTab, navigator: self)
+        switch route.kind {
+        case .folder:
+            switch route.mode {
+            case .browse:
+                vc = makeFolderGrid(folderPath: route.path, title: route.title, account: route.account)
+            case .flat:
+                vc = FlatGalleryViewController(folderPath: route.path, title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self)
+            }
+        case .favorites:
+            vc = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [client] in
+                try await client.favorites()
+            }
+        case .album:
+            let davPath = route.path
+            vc = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [client] in
+                try await client.albumPhotos(davPath: davPath)
+            }
         }
         vc.additionalSafeAreaInsets.bottom = GlassTabBar.preferredHeight + 4
         return vc
@@ -241,11 +251,11 @@ final class BrowseNavController: UIViewController {
 
     // MARK: - Navigation
 
-    /// Pushes a new folder level in `mode`, recording it on the tab so it restores.
-    private func push(folderPath: String, title: String, account: String, mode: BrowseRoute.Mode) {
-        browseTab.path.append(BrowseRoute(folderPath: folderPath, title: title, account: account, mode: mode))
+    /// Pushes a new level, recording it on the tab so it restores.
+    private func push(_ route: BrowseRoute) {
+        browseTab.path.append(route)
         tabsModel.save()
-        navController.pushViewController(makeViewController(folderPath: folderPath, title: title, account: account, mode: mode), animated: true)
+        navController.pushViewController(makeViewController(for: route), animated: true)
     }
 
     /// Toggles the current level between its folder grid and its flattened gallery,
@@ -256,12 +266,9 @@ final class BrowseNavController: UIViewController {
     private func toggleGallery() {
         guard !isSwappingPresentation else { return }
         let depth = navController.viewControllers.count - 1
-        guard depth >= 0 else { return }
-        if depth == 0 {
-            browseTab.rootMode.toggle()
-        } else {
-            browseTab.path[depth - 1].mode.toggle()
-        }
+        // Home (depth 0) has no toggle; favorites/albums are always flat.
+        guard depth >= 1, browseTab.path[depth - 1].kind == .folder else { return }
+        browseTab.path[depth - 1].mode.toggle()
         tabsModel.save()
         isSwappingPresentation = true
         swapTopViewController(with: makeViewController(atDepth: depth))
@@ -300,13 +307,22 @@ extension BrowseNavController: GalleryNavigator {
             // A leaf opens straight into its flattened gallery; the Gallery toggle can
             // still flip it to a browse grid.
             let mode: BrowseRoute.Mode = await isLeafFolder(route) ? .flat : .browse
-            push(folderPath: route.folderPath, title: route.title, account: route.account, mode: mode)
+            push(.folder(path: route.folderPath, title: route.title, account: route.account, mode: mode))
         }
     }
 
     func openFolderInNewTab(_ route: FolderRoute) {
-        tabsModel.open(BrowseRoute(folderPath: route.folderPath, title: route.title, account: route.account, mode: .browse), inNewTab: true)
+        tabsModel.open(.folder(path: route.folderPath, title: route.title, account: route.account, mode: .browse), inNewTab: true)
     }
+
+    func openFavorites() {
+        push(.favorites(account: client.credentials.account))
+    }
+
+    func openAlbum(_ album: Album) {
+        push(.album(album, account: client.credentials.account))
+    }
+
     func openViewer(photos: [PhotoItem], initialID: String, source: (any PhotoViewerTransitionSource)?) {
         browseTab.openViewer(photos: photos, initialID: initialID, source: source)
     }

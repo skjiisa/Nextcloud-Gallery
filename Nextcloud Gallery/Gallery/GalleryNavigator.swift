@@ -17,6 +17,10 @@ protocol GalleryNavigator: AnyObject {
     func openFolder(_ route: FolderRoute)
     /// Open a folder in a new background tab and switch to it ("Open in New Tab").
     func openFolderInNewTab(_ route: FolderRoute)
+    /// Open the account's Nextcloud favorites as a flat gallery.
+    func openFavorites()
+    /// Open a Nextcloud Photos album as a flat gallery.
+    func openAlbum(_ album: Album)
     /// Present the full-screen viewer for `photos`, starting at `initialID`. `source`
     /// supplies the tapped tile's geometry for the grow-open / shrink-close
     /// transition (held weakly; a fade is used if it's gone).

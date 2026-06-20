@@ -49,6 +49,27 @@ nonisolated struct GridItemSnapshot: Hashable, Sendable, Identifiable {
         fullPath = item.fullPath
         coverTiles = item.isDirectory ? item.coverTiles : []
     }
+
+    /// Memberwise initializer (the cache-backed `init(item:)` above suppresses the
+    /// synthesized one). Lets other sources — e.g. live server entries mapped in
+    /// ``GridItemSnapshot/init(file:account:)`` — build a snapshot directly.
+    init(
+        ocId: String, account: String, isDirectory: Bool, fileName: String,
+        fileId: String, etag: String, hasPreview: Bool, width: Int, height: Int,
+        fullPath: String, coverTiles: [CoverTile]
+    ) {
+        self.ocId = ocId
+        self.account = account
+        self.isDirectory = isDirectory
+        self.fileName = fileName
+        self.fileId = fileId
+        self.etag = etag
+        self.hasPreview = hasPreview
+        self.width = width
+        self.height = height
+        self.fullPath = fullPath
+        self.coverTiles = coverTiles
+    }
 }
 
 extension PhotoItem {
