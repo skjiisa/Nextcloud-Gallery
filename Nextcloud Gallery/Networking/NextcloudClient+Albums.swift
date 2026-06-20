@@ -129,6 +129,32 @@ extension NextcloudClient {
         return result.files ?? []
     }
 
+    // MARK: - Tagged files
+
+    /// All image files carrying the system tag `tagId`, as cache-free snapshots. A
+    /// `filter-files` REPORT lists the tagged file ids, which are resolved to real
+    /// `NKFile`s the same way album photos are (so the viewer/saver work on them).
+    func taggedFiles(tagId: String) async throws -> [GridItemSnapshot] {
+        let body = """
+        <?xml version="1.0"?>
+        <oc:filter-files xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+          <d:prop><oc:fileid/></d:prop>
+          <oc:filter-rules><oc:systemtag>\(tagId)</oc:systemtag></oc:filter-rules>
+        </oc:filter-files>
+        """
+        let data = try await davRequest(method: "REPORT", urlString: WebDAVPath.normalized(filesRootPath) + "/", body: body)
+        let fileIds = WebDAVMultiStatus.parse(data).compactMap { entry -> String? in
+            guard let id = entry.props["fileid"], !id.isEmpty else { return nil }
+            return id
+        }
+        guard !fileIds.isEmpty else { return [] }
+
+        let account = credentials.account
+        return try await resolveFiles(fileIds: fileIds)
+            .filter { !$0.directory && $0.hasPreview && $0.classFile == NKTypeClassFile.image.rawValue }
+            .map { GridItemSnapshot(file: $0, account: account) }
+    }
+
     // MARK: - Writing
 
     /// Creates a new, empty album.

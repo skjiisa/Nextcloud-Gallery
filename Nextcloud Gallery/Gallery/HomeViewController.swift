@@ -4,21 +4,24 @@
 //
 //  The root of every tab's navigation stack. Replaces "drop straight into the Files
 //  root" with a hub: a link into the Files folder tree, a strip of the account's
-//  Nextcloud favorites, and a grid of Nextcloud Photos albums. Favorites and albums
-//  are read live (see ``NextcloudClient`` extensions) — they aren't part of the
-//  warmed folder cache — and open as flat galleries via the ``GalleryNavigator``.
+//  Nextcloud favorites, a grid of Nextcloud Photos albums, and a list of system tags.
+//  Favorites, albums, and tags are read live (see ``NextcloudClient`` extensions) —
+//  they aren't part of the warmed folder cache — and each opens as a flat gallery via
+//  the ``GalleryNavigator``.
 //
 
 import UIKit
+import NextcloudKit
 
 final class HomeViewController: UIViewController {
     // `nonisolated` so their Hashable conformance is Sendable — diffable data source
     // identifiers must be, and a type nested in this main-actor class otherwise isn't.
-    private nonisolated enum Section: Hashable { case library, favorites, albums }
+    private nonisolated enum Section: Hashable { case library, favorites, albums, tags }
     private nonisolated enum Item: Hashable {
         case filesLink
         case favorite(GridItemSnapshot)
         case album(Album)
+        case tag(NKTag)
     }
 
     private let environment: AppEnvironment
@@ -31,6 +34,7 @@ final class HomeViewController: UIViewController {
 
     private var favorites: [GridItemSnapshot] = []
     private var albums: [Album] = []
+    private var tags: [NKTag] = []
     private var didInitialLoad = false
 
     /// How many favorites the Home strip previews ("See All" opens the rest).
@@ -86,6 +90,7 @@ final class HomeViewController: UIViewController {
             case .library: return self.librarySection(env)
             case .favorites: return self.favoritesSection()
             case .albums: return self.albumsSection(env)
+            case .tags: return self.tagsSection(env)
             }
         }
     }
@@ -94,6 +99,14 @@ final class HomeViewController: UIViewController {
         var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
         config.headerMode = .none
         return NSCollectionLayoutSection.list(using: config, layoutEnvironment: env)
+    }
+
+    private func tagsSection(_ env: NSCollectionLayoutEnvironment) -> NSCollectionLayoutSection {
+        var config = UICollectionLayoutListConfiguration(appearance: .insetGrouped)
+        config.headerMode = .none
+        let section = NSCollectionLayoutSection.list(using: config, layoutEnvironment: env)
+        section.boundarySupplementaryItems = [headerItem()]
+        return section
     }
 
     private func favoritesSection() -> NSCollectionLayoutSection {
@@ -154,9 +167,22 @@ final class HomeViewController: UIViewController {
             guard let self else { return }
             cell.configure(with: item, fill: true, cornerRadius: 10, store: self.thumbnailStore, client: self.client)
         }
+        // Favorites can include folders; render those as folder tiles in the strip.
+        let favoriteFolderCell = UICollectionView.CellRegistration<FolderGridCell, GridItemSnapshot> { [weak self] cell, _, item in
+            guard let self else { return }
+            cell.configure(with: item, store: self.thumbnailStore, client: self.client)
+        }
         let albumCell = UICollectionView.CellRegistration<AlbumGridCell, Album> { [weak self] cell, _, album in
             guard let self else { return }
             cell.configure(with: album, store: self.thumbnailStore, client: self.client)
+        }
+        let tagCell = UICollectionView.CellRegistration<UICollectionViewListCell, NKTag> { cell, _, tag in
+            var content = cell.defaultContentConfiguration()
+            content.text = tag.name
+            content.image = UIImage(systemName: "tag.fill")
+            content.imageProperties.tintColor = tag.color.flatMap(UIColor.init(hex:)) ?? .secondaryLabel
+            cell.contentConfiguration = content
+            cell.accessories = [.disclosureIndicator()]
         }
 
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { collectionView, indexPath, item in
@@ -164,9 +190,14 @@ final class HomeViewController: UIViewController {
             case .filesLink:
                 return collectionView.dequeueConfiguredReusableCell(using: filesCell, for: indexPath, item: item)
             case .favorite(let snapshot):
+                if snapshot.isDirectory {
+                    return collectionView.dequeueConfiguredReusableCell(using: favoriteFolderCell, for: indexPath, item: snapshot)
+                }
                 return collectionView.dequeueConfiguredReusableCell(using: favoriteCell, for: indexPath, item: snapshot)
             case .album(let album):
                 return collectionView.dequeueConfiguredReusableCell(using: albumCell, for: indexPath, item: album)
+            case .tag(let tag):
+                return collectionView.dequeueConfiguredReusableCell(using: tagCell, for: indexPath, item: tag)
             }
         }
 
@@ -177,6 +208,8 @@ final class HomeViewController: UIViewController {
                 header.configure(title: "Favorites", actionTitle: "See All") { [weak self] in self?.navigator?.openFavorites() }
             case .albums:
                 header.configure(title: "Albums", actionTitle: nil, onAction: nil)
+            case .tags:
+                header.configure(title: "Tags", actionTitle: nil, onAction: nil)
             case .library:
                 header.configure(title: "", actionTitle: nil, onAction: nil)
             }
@@ -200,16 +233,22 @@ final class HomeViewController: UIViewController {
             snapshot.appendSections([.albums])
             snapshot.appendItems(albums.map(Item.album), toSection: .albums)
         }
+        if !tags.isEmpty {
+            snapshot.appendSections([.tags])
+            snapshot.appendItems(tags.map(Item.tag), toSection: .tags)
+        }
         dataSource.apply(snapshot, animatingDifferences: true)
     }
 
     private func load() async {
-        // Favorites and albums are independent best-effort fetches; either can fail
-        // (or be empty) without affecting the other or the always-present Files link.
+        // Favorites, albums, and tags are independent best-effort fetches; any can fail
+        // (or be empty) without affecting the others or the always-present Files link.
         async let favoritesResult = client.favorites()
         async let albumsResult = client.listAlbums()
+        async let tagsResult = client.availableTags()
         favorites = (try? await favoritesResult) ?? favorites
         albums = (try? await albumsResult) ?? albums
+        tags = (try? await tagsResult) ?? tags
         refreshControl.endRefreshing()
         applySnapshot()
     }
@@ -227,12 +266,18 @@ extension HomeViewController: UICollectionViewDelegate {
         case .filesLink:
             navigator?.openFolder(FolderRoute(folderPath: client.filesRootPath, title: "Files", account: client.credentials.account))
         case .favorite(let snapshot):
-            // Page through every favorite (not just the strip's preview); a fade is
-            // used since the strip cell isn't a full-grid transition source.
-            let photos = favorites.map(PhotoItem.init(snapshot:))
-            navigator?.openViewer(photos: photos, initialID: snapshot.ocId, source: nil)
+            if snapshot.isDirectory {
+                navigator?.openFolder(FolderRoute(folderPath: snapshot.fullPath, title: snapshot.fileName, account: client.credentials.account))
+            } else {
+                // Page through every favorite photo (not just the strip's preview); a
+                // fade is used since the strip cell isn't a full-grid transition source.
+                let photos = favorites.filter { !$0.isDirectory }.map(PhotoItem.init(snapshot:))
+                navigator?.openViewer(photos: photos, initialID: snapshot.ocId, source: nil)
+            }
         case .album(let album):
             navigator?.openAlbum(album)
+        case .tag(let tag):
+            navigator?.openTag(id: tag.id, name: tag.name)
         }
     }
 }

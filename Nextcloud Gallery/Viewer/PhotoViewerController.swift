@@ -157,7 +157,7 @@ final class PhotoViewerController: UIViewController {
         topItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(doneTapped))
         topBar.items = [topItem]
 
-        favoriteItem = UIBarButtonItem(image: UIImage(systemName: "heart"), style: .plain, target: self, action: #selector(favoriteTapped))
+        favoriteItem = UIBarButtonItem(image: UIImage(systemName: "star"), style: .plain, target: self, action: #selector(favoriteTapped))
         moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMoreMenu())
 
         // The app's tab bar. All buttons stay in place (zoom + gallery are disabled
@@ -605,11 +605,11 @@ final class PhotoViewerController: UIViewController {
         return UIMenu(children: [album, tags])
     }
 
-    /// Updates the heart to match the shown photo's favorite state.
+    /// Updates the star to match the shown photo's favorite state.
     private func refreshFavoriteButton() {
         let isFavorite = currentMetadata?.isFavorite ?? false
-        favoriteItem?.image = UIImage(systemName: isFavorite ? "heart.fill" : "heart")
-        favoriteItem?.tintColor = isFavorite ? .systemRed : nil
+        favoriteItem?.image = UIImage(systemName: isFavorite ? "star.fill" : "star")
+        favoriteItem?.tintColor = isFavorite ? .systemYellow : nil
     }
 
     /// Fetches the shown photo's favorite + tags so the heart reflects real state.

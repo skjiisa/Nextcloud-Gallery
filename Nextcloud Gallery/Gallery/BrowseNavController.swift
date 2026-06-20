@@ -234,6 +234,11 @@ final class BrowseNavController: UIViewController {
             vc = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [client] in
                 try await client.albumPhotos(davPath: davPath)
             }
+        case .tag:
+            let tagId = route.path
+            vc = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [client] in
+                try await client.taggedFiles(tagId: tagId)
+            }
         }
         vc.additionalSafeAreaInsets.bottom = GlassTabBar.preferredHeight + 4
         return vc
@@ -321,6 +326,10 @@ extension BrowseNavController: GalleryNavigator {
 
     func openAlbum(_ album: Album) {
         push(.album(album, account: client.credentials.account))
+    }
+
+    func openTag(id: String, name: String) {
+        push(.tag(id: id, name: name, account: client.credentials.account))
     }
 
     func openViewer(photos: [PhotoItem], initialID: String, source: (any PhotoViewerTransitionSource)?) {

@@ -21,6 +21,8 @@ protocol GalleryNavigator: AnyObject {
     func openFavorites()
     /// Open a Nextcloud Photos album as a flat gallery.
     func openAlbum(_ album: Album)
+    /// Open a flat gallery of files carrying the given system tag.
+    func openTag(id: String, name: String)
     /// Present the full-screen viewer for `photos`, starting at `initialID`. `source`
     /// supplies the tapped tile's geometry for the grow-open / shrink-close
     /// transition (held weakly; a fade is used if it's gone).

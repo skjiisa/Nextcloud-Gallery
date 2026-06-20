@@ -11,8 +11,9 @@ import Foundation
 import NextcloudKit
 
 extension NextcloudClient {
-    /// The account's favorited photos, newest first, as cache-free snapshots.
-    /// Folders and non-image favorites are dropped (this is a photo gallery).
+    /// The account's favorites as cache-free snapshots: favorited folders first (by
+    /// name), then favorited photos (newest first). Non-image, non-folder favorites are
+    /// dropped (this is a photo gallery).
     func favorites(queue: DispatchQueue = .main) async throws -> [GridItemSnapshot] {
         let options = NKRequestOptions(queue: queue)
         let result = await NextcloudKit.shared.listingFavoritesAsync(
@@ -23,8 +24,12 @@ extension NextcloudClient {
         guard result.error == .success else { throw GalleryError(result.error) }
         let account = credentials.account
         return (result.files ?? [])
-            .filter { !$0.directory && $0.hasPreview && $0.classFile == NKTypeClassFile.image.rawValue }
-            .sorted { $0.date > $1.date }
+            .filter { $0.directory || ($0.hasPreview && $0.classFile == NKTypeClassFile.image.rawValue) }
+            .sorted { a, b in
+                if a.directory != b.directory { return a.directory }   // folders first
+                return a.directory ? a.fileName.localizedStandardCompare(b.fileName) == .orderedAscending
+                                   : a.date > b.date
+            }
             .map { GridItemSnapshot(file: $0, account: account) }
     }
 

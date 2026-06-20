@@ -244,11 +244,36 @@ extension FolderGridViewController: UICollectionViewDelegate, UICollectionViewDa
     func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         guard let item = dataSource.itemIdentifier(for: indexPath), item.isDirectory else { return nil }
         let route = FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account)
+        let path = item.fullPath
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             let open = UIAction(title: "Open in New Tab", image: UIImage(systemName: "plus.square.on.square")) { _ in
                 self?.navigator?.openFolderInNewTab(route)
             }
-            return UIMenu(children: [open])
+            // Fetch the folder's current favorite state so the action reads correctly.
+            let favorite = UIDeferredMenuElement.uncached { [weak self] completion in
+                Task { @MainActor in
+                    let isFavorite = (try? await self?.client.fileMetadata(serverPath: path))?.isFavorite ?? false
+                    let action = UIAction(
+                        title: isFavorite ? "Remove from Favorites" : "Favorite",
+                        image: UIImage(systemName: isFavorite ? "star.slash" : "star")
+                    ) { _ in self?.setFavorite(path: path, to: !isFavorite) }
+                    completion([action])
+                }
+            }
+            return UIMenu(children: [favorite, open])
+        }
+    }
+
+    /// Toggles a folder's favorite state (no grid badge yet — it surfaces in Home's
+    /// Favorites on next load). A haptic confirms the result.
+    private func setFavorite(path: String, to favorite: Bool) {
+        Task {
+            do {
+                try await client.setFavorite(serverPath: path, favorite: favorite)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } catch {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
         }
     }
 
