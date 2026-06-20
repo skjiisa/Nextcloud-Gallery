@@ -49,6 +49,14 @@ final class PhotoPageViewController: UIViewController {
     /// Whether the photo is zoomed past its fitted size (gates swipe-to-dismiss).
     var isZoomed: Bool { scrollView.isZoomedIn }
 
+    /// The current zoom + pan, for locking — nil at the rest scale.
+    var currentLock: ZoomLock? { scrollView.currentLock }
+
+    /// Make `lock`'s framing this photo's rest state (or drop back to fit), live —
+    /// used when the bar's lock button is toggled while the photo is open.
+    func applyLock(_ lock: ZoomLock) { scrollView.lock(to: lock) }
+    func clearLock() { scrollView.unlock() }
+
     /// This page's double-tap-to-zoom recognizer, so the viewer's chrome-toggle tap
     /// can require it to fail.
     var zoomDoubleTap: UITapGestureRecognizer { scrollView.doubleTap }
@@ -63,6 +71,12 @@ final class PhotoPageViewController: UIViewController {
         scrollView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         scrollView.onZoomChanged = { [weak self] zoomed in self?.onZoomChanged?(zoomed) }
         view.addSubview(scrollView)
+
+        // If this photo's zoom is locked, adopt that framing as the rest state so it
+        // reopens reframed. The scroll view defers it until it has real bounds.
+        if let lock = environment.zoomLockStore.lock(for: photo.id) {
+            scrollView.lock(to: lock)
+        }
 
         spinner.color = .secondaryLabel
         spinner.translatesAutoresizingMaskIntoConstraints = false

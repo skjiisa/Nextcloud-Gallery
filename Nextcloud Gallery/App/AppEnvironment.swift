@@ -19,6 +19,8 @@ final class AppEnvironment {
     let thumbnailStore = ThumbnailStore()
     let fullImageStore = FullImageStore()
     let networkMonitor = NetworkMonitor()
+    /// Remembered zoom + pan for "locked" photos, so they reopen reframed.
+    let zoomLockStore = ZoomLockStore()
 
     private(set) var credentials: AccountCredentials?
     private(set) var client: NextcloudClient?

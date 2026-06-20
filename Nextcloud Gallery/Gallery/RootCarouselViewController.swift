@@ -27,9 +27,16 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     private var mountedIDs: Set<UUID> = []
 
     private var isDragging = false
+    /// Where the finger left the carousel when a drag resolves to opening the switcher,
+    /// held between `carouselParkForSnapshot` and `carouselBounceToActive`.
+    private var parkedOffset: CGAffineTransform = .identity
     private let peekGap: CGFloat = 16
     private var pageWidth: CGFloat { view.bounds.width }
     private var slot: CGFloat { pageWidth + peekGap }
+
+    /// A soft tick when the carousel lands on a different tab — mirrors the viewer's
+    /// page-change feedback so tab and photo paging feel the same.
+    private let selectionHaptic = UISelectionFeedbackGenerator()
 
     // Presented modals (driven by the tabs model).
     private var switcherVC: TabSwitcherViewController?
@@ -153,6 +160,7 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     func carouselDragChanged(translation: CGFloat) {
         if !isDragging {
             isDragging = true
+            selectionHaptic.prepare()
             // Snapshot the active tab while it's still full-screen, for its card.
             tabs.snapshotActiveTab()
             mountNeighbours()
@@ -165,21 +173,30 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         container.transform = CGAffineTransform(translationX: offset, y: 0)
     }
 
-    func carouselDragEnded(translation: CGFloat) {
+    func carouselDragEnded(translation: CGFloat, velocity: CGFloat) {
         guard isDragging else { return }
         let active = tabs.activeIndex
         let threshold = pageWidth * 0.22
+        // Project where a flick would coast to (~a fifth of a second of glide), so a
+        // quick flick changes tabs on little travel — like a paged scroll view — while
+        // a slow drag still needs to clear the distance threshold.
+        let projected = translation + velocity * 0.2
         var target = active
-        if translation <= -threshold, active < tabs.tabs.count - 1 {
+        if projected <= -threshold, active < tabs.tabs.count - 1 {
             target = active + 1
-        } else if translation >= threshold, active > 0 {
+        } else if projected >= threshold, active > 0 {
             target = active - 1
         }
 
         let settled = -CGFloat(target - active) * slot
-        UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.4, options: [.curveEaseOut]) {
+        if target != active { selectionHaptic.selectionChanged() }
+        // Carry the finger's speed into the spring so the snap continues the flick
+        // rather than restarting from a standstill.
+        let remaining = max(1, abs(settled - container.transform.tx))
+        let initialV = min(abs(velocity) / remaining, 6)
+        animateSnap(initialVelocity: initialV) {
             self.container.transform = CGAffineTransform(translationX: settled, y: 0)
-        } completion: { _ in
+        } completion: {
             if target != active {
                 self.tabs.activeTabID = self.tabs.tabs[target].id
                 self.tabs.save()
@@ -189,12 +206,40 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
     }
 
-    func carouselDragCancelled() {
+    func carouselParkForSnapshot() {
         guard isDragging else { return }
-        // Snap straight back to the active tab — no animation — so the screen is at
-        // rest the instant the caller snapshots it for the switcher.
-        isDragging = false
-        rebuildActive()
+        // Stash where the finger left the carousel, then sit at rest so the snapshot
+        // the caller is about to take is clean (mounted neighbours are parked off-screen
+        // at ±slot, so only the active tab shows).
+        parkedOffset = container.transform
+        container.transform = .identity
+    }
+
+    func carouselBounceToActive() {
+        guard isDragging else { return }
+        // Restore the finger's last position (no frame was drawn at the parked identity,
+        // so this doesn't jump) and spring home — the bounce the snapshot couldn't show.
+        container.transform = parkedOffset
+        animateSnap(initialVelocity: 0) {
+            self.container.transform = .identity
+        } completion: {
+            self.isDragging = false
+            self.rebuildActive()
+        }
+    }
+
+    /// Runs the carousel's snap-into-place animation, honouring Reduce Motion (a short
+    /// linear settle instead of a spring with overshoot).
+    private func animateSnap(initialVelocity: CGFloat, _ animations: @escaping () -> Void, completion: @escaping () -> Void) {
+        if UIAccessibility.isReduceMotionEnabled {
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                animations()
+            } completion: { _ in completion() }
+        } else {
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: initialVelocity, options: [.curveEaseOut, .allowUserInteraction]) {
+                animations()
+            } completion: { _ in completion() }
+        }
     }
 
     // MARK: - Modal reconciliation
