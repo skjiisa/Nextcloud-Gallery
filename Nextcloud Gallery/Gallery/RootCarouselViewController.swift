@@ -257,8 +257,10 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         // neighbour or offset composite) and captures the bar at its current lifted position,
         // so the card matches the live tab and the bar doesn't snap as the card takes over.
         // Store it so the switcher cell the card lands on matches too.
-        if let rendered = controllers[tabs.activeTabID].flatMap({ renderSnapshot(of: $0.view) }) {
+        if let nav = controllers[tabs.activeTabID], let rendered = renderSnapshot(of: nav.view) {
             tabs.activeTab.snapshot = rendered
+            // Remember how far the bar was raised so reopening lands it smoothly to rest.
+            tabs.activeTab.snapshotBarLift = nav.currentBarLift
         }
         let snapshot = tabs.activeTab.snapshot
 
@@ -557,6 +559,11 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         } completion: { _ in
             card.removeFromSuperview()
             tearDown()
+            // The snapshot baked the bar in at its raised lift; place the live bar there to
+            // match the card we just removed, then spring it down so it lands smoothly.
+            let lift = self.tabs.activeTab.snapshotBarLift
+            if lift > 0 { self.controllers[self.tabs.activeTabID]?.settleBar(fromLift: lift) }
+            self.tabs.activeTab.snapshotBarLift = 0
         }
     }
 

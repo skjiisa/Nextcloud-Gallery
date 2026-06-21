@@ -59,6 +59,11 @@ final class BrowseTab: Identifiable {
     /// In-memory only; restored tabs fall back to a placeholder until first shown.
     var snapshot: UIImage?
 
+    /// How far the tab bar was raised (points) in the current ``snapshot`` — captured at
+    /// lift-off so reopening the tab can land the bar smoothly from there to rest. 0 for
+    /// snapshots taken at rest. In-memory, observation-ignored (purely transient).
+    @ObservationIgnored var snapshotBarLift: CGFloat = 0
+
     init(
         id: UUID = UUID(),
         path: [BrowseRoute] = [],

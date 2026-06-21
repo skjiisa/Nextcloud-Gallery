@@ -54,6 +54,15 @@ final class BrowseNavController: UIViewController {
     private let bar = GlassTabBar()
     private var barObservation: ObservationToken?
     private var photoViewer: PhotoViewerController?
+
+    /// Whichever bar is currently on screen for this tab — the viewer's while a photo is
+    /// open, otherwise the browse bar.
+    private var activeBar: GlassTabBar { photoViewer?.liftBar ?? bar }
+    /// The current lift of this tab's on-screen bar, captured into its snapshot at lift-off.
+    var currentBarLift: CGFloat { activeBar.currentLift }
+    /// Springs this tab's on-screen bar down from `lift` to rest, so reopening the tab lands
+    /// the bar smoothly from where its snapshot captured it.
+    func settleBar(fromLift lift: CGFloat) { activeBar.settle(fromLift: lift) }
     private var viewerObservation: ObservationToken?
     /// True while the Gallery toggle's cross-dissolve is in flight, to ignore repeat
     /// taps until it settles.

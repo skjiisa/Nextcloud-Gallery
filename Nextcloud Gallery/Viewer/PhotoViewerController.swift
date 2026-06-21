@@ -63,6 +63,9 @@ final class PhotoViewerController: UIViewController {
     /// The app's bottom tab bar, shown over the viewer (viewer mode: just the tab
     /// pill → switcher, New tab, Settings). Keeps tab context while viewing a photo.
     private let tabBar = GlassTabBar()
+    /// The viewer's bottom bar, exposed so the tab page can land it smoothly when reopening
+    /// a tab whose snapshot was captured with this bar raised.
+    var liftBar: GlassTabBar { tabBar }
     private var filmstrip: PhotoFilmstripView!
     private var barObservation: ObservationToken?
 

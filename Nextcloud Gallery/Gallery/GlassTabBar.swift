@@ -388,6 +388,16 @@ final class GlassTabBar: UIView {
         transform = CGAffineTransform(translationX: 0, y: -lift)
     }
 
+    /// The bar's current upward lift in points (0 at rest).
+    var currentLift: CGFloat { -transform.ty }
+
+    /// Places the bar `lift` points up, then springs it back to rest. Used when reopening a
+    /// tab whose snapshot captured the bar raised, so it lands smoothly instead of jumping.
+    func settle(fromLift lift: CGFloat) {
+        transform = CGAffineTransform(translationX: 0, y: -lift)
+        springBarDown()
+    }
+
     /// Settles the lifted bar back down — a soft spring, or a brief fade under Reduce
     /// Motion so there's no overshoot.
     private func springBarDown() {

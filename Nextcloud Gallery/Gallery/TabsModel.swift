@@ -167,6 +167,7 @@ final class TabsModel {
     /// starting) — never once another surface has covered it.
     func snapshotActiveTab() {
         activeTab.snapshot = WindowSnapshot.capture()
+        activeTab.snapshotBarLift = 0   // captured with the bar at rest
     }
 
     // MARK: - Persistence
