@@ -259,6 +259,15 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         if !isDragging { tabs.snapshotActiveTab() }
         let snapshot = tabs.activeTab.snapshot
 
+        // Capture any peeking neighbour (image + on-screen frame) before the carousel resets,
+        // so it can fade out over the revealed grid instead of vanishing instantly.
+        let neighbourFades: [(UIImage, CGRect)] = (isDragging && !UIAccessibility.isReduceMotionEnabled)
+            ? mountedIDs.filter { $0 != tabs.activeTabID }.compactMap { id in
+                guard let nav = controllers[id], let image = renderSnapshot(of: nav.view) else { return nil }
+                return (image, container.convert(nav.view.frame, to: view))
+            }
+            : []
+
         // Park the carousel back on the active tab behind the (about-to-be-added) card.
         container.transform = .identity
         isDragging = false
@@ -277,6 +286,18 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
             switcher.view.alpha = 0
             UIView.animate(withDuration: 0.2) { switcher.view.alpha = 1 }
             return
+        }
+
+        // Fade the captured neighbour(s) out over the revealed grid (above the switcher).
+        for (image, frame) in neighbourFades {
+            let ghost = UIImageView(image: image)
+            ghost.frame = frame
+            ghost.isUserInteractionEnabled = false
+            ghost.clipsToBounds = true
+            view.addSubview(ghost)
+            UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                ghost.alpha = 0
+            } completion: { _ in ghost.removeFromSuperview() }
         }
 
         // The card starts exactly where the tab is — full-size, at its current horizontal
@@ -351,7 +372,7 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     }
 
     /// The floating card's frame for a finger at `point` (root-view space): sized by how far
-    /// it's been lifted (full-screen → `heldScale`, latched so it only shrinks) and
+    /// it's currently lifted (full-screen → `heldScale`, tracking height both ways) and
     /// positioned so the original grip point stays under the finger.
     private func heldFrame(under point: CGPoint) -> CGRect {
         let bounds = view.bounds
@@ -383,6 +404,16 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         card.addSubview(imageView)
         return card
+    }
+
+    /// Renders a view's current content to an image (used to fade a peeking neighbour out
+    /// after the carousel resets it away).
+    private func renderSnapshot(of v: UIView) -> UIImage? {
+        guard v.bounds.width > 0, v.bounds.height > 0 else { return nil }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = v.window?.screen.scale ?? 0   // 0 → device scale
+        let renderer = UIGraphicsImageRenderer(bounds: v.bounds, format: format)
+        return renderer.image { _ in v.drawHierarchy(in: v.bounds, afterScreenUpdates: false) }
     }
 
     /// Springs the flying card to `target`, fading the active-cell selection ring in as it

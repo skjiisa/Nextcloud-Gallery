@@ -300,12 +300,19 @@ final class GlassTabBar: UIView {
             if liftedOff { onSwitcherLiftChanged?(loc); break }
             // Drive both axes at once so the bar tracks the finger wherever it goes;
             // the carousel only kicks in once there's a real sideways intent.
-            if !carouselEngaged, abs(side) > Self.carouselSlop { carouselEngaged = true }
+            if !carouselEngaged, abs(side) > Self.carouselSlop {
+                carouselEngaged = true
+                // The bar now rides the carousel horizontally — drop any vertical lift so it
+                // can't snap back down when the tab lifts off mid-swipe.
+                springBarDown()
+            }
             if carouselEngaged { onDragChanged?(side) }
             // Up-swipe winning and past the threshold → lift the tab off into the finger.
             if up >= liftThreshold, up >= abs(side) {
                 liftOff(at: loc)
-            } else {
+            } else if !carouselEngaged {
+                // Lift the bar only on a vertical drag; a horizontal/diagonal drag rides the
+                // carousel and shouldn't also raise the bar.
                 applyLift(up)
             }
 
