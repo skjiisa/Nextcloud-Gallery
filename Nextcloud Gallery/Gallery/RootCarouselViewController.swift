@@ -253,10 +253,13 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         let startFrame = CGRect(x: offsetX, y: 0, width: view.bounds.width, height: view.bounds.height)
         liftGrip = CGPoint(x: (f.x - offsetX) / max(1, view.bounds.width), y: f.y / max(1, view.bounds.height))
 
-        // Snapshot for the card: at rest the window IS the clean tab; mid-drag it's the
-        // composite, so reuse the clean full-screen snapshot taken when the drag began (in
-        // `carouselDragChanged`) rather than capturing the half-swiped screen.
-        if !isDragging { tabs.snapshotActiveTab() }
+        // Snapshot for the card: render the active tab's own view. It's clean (no half-swiped
+        // neighbour or offset composite) and captures the bar at its current lifted position,
+        // so the card matches the live tab and the bar doesn't snap as the card takes over.
+        // Store it so the switcher cell the card lands on matches too.
+        if let rendered = controllers[tabs.activeTabID].flatMap({ renderSnapshot(of: $0.view) }) {
+            tabs.activeTab.snapshot = rendered
+        }
         let snapshot = tabs.activeTab.snapshot
 
         // Capture any peeking neighbour (image + on-screen frame) before the carousel resets,
@@ -311,10 +314,15 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     }
 
     func switcherLiftChanged(at location: CGPoint) {
-        // Float the card under the finger: it shrinks as you lift it off the bar (latched,
-        // so it only ever shrinks), then follows the finger anywhere you drag it.
+        // Float the card under the finger with a light spring, so a quick swipe bounces the
+        // distance up to its held position instead of snapping straight there; a steady drag
+        // still follows closely. (Size still tracks height via the target frame.)
         guard let card = flyingCard else { return }
-        card.frame = heldFrame(under: view.convert(location, from: nil))
+        let target = heldFrame(under: view.convert(location, from: nil))
+        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0,
+                       options: [.beginFromCurrentState, .allowUserInteraction]) {
+            card.frame = target
+        }
     }
 
     func switcherLiftEnded(at location: CGPoint, velocity: CGPoint) {

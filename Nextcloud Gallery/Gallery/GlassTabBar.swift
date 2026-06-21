@@ -300,19 +300,14 @@ final class GlassTabBar: UIView {
             if liftedOff { onSwitcherLiftChanged?(loc); break }
             // Drive both axes at once so the bar tracks the finger wherever it goes;
             // the carousel only kicks in once there's a real sideways intent.
-            if !carouselEngaged, abs(side) > Self.carouselSlop {
-                carouselEngaged = true
-                // The bar now rides the carousel horizontally — drop any vertical lift so it
-                // can't snap back down when the tab lifts off mid-swipe.
-                springBarDown()
-            }
+            if !carouselEngaged, abs(side) > Self.carouselSlop { carouselEngaged = true }
             if carouselEngaged { onDragChanged?(side) }
-            // Up-swipe winning and past the threshold → lift the tab off into the finger.
+            // Up-swipe winning and past the threshold → lift the tab off into the finger;
+            // otherwise the bar follows the finger up (rubber-band) on either axis, so it
+            // keeps dragging up even when the swipe started sideways.
             if up >= liftThreshold, up >= abs(side) {
                 liftOff(at: loc)
-            } else if !carouselEngaged {
-                // Lift the bar only on a vertical drag; a horizontal/diagonal drag rides the
-                // carousel and shouldn't also raise the bar.
+            } else {
                 applyLift(up)
             }
 
@@ -348,8 +343,11 @@ final class GlassTabBar: UIView {
     private func liftOff(at location: CGPoint) {
         liftedOff = true
         haptic.impactOccurred()
-        springBarDown()
+        // Hand off first — the coordinator snapshots the tab WITH the bar at its current
+        // lifted position, so the flying card matches it — then settle the bar down behind
+        // the card. That way the bar never visibly snaps when the tab lifts off mid-swipe.
         onSwitcherLiftBegan?(location)
+        springBarDown()
     }
 
     /// Resolves a finished drag (one that never lifted off) by where it was *heading*,
