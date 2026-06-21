@@ -108,8 +108,12 @@ final class TabSwitcherViewController: UIViewController {
             collectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: false)
             collectionView.layoutIfNeeded()
         }
+        // Prefer the realized cell's exact card-body frame so the flying card lands
+        // pixel-perfect; fall back to a computed rect if the cell isn't realized.
+        if let cell = collectionView.cellForItem(at: indexPath) as? TabCardCell {
+            return cell.cardBodyFrame(in: space)
+        }
         guard let attr = collectionView.layoutAttributesForItem(at: indexPath) else { return nil }
-        // The cell spans card + title; the card body is the top (width / aspect) of it.
         let cell = attr.frame
         let cardRect = CGRect(x: cell.minX, y: cell.minY, width: cell.width, height: cell.width / TabCardCell.cardAspect)
         return collectionView.convert(cardRect, to: space)
@@ -186,6 +190,13 @@ final class TabCardCell: UICollectionViewCell {
     var isCardHidden: Bool {
         get { card.isHidden }
         set { card.isHidden = newValue }
+    }
+
+    /// The exact frame of the card body in `space` — what the lift card flies into / out
+    /// of, so its landing lines up pixel-for-pixel (the title label's real height differs
+    /// from the layout's reserved estimate, so a computed rect lands slightly off).
+    func cardBodyFrame(in space: UICoordinateSpace) -> CGRect {
+        card.convert(card.bounds, to: space)
     }
 
     override init(frame: CGRect) {

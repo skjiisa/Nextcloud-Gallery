@@ -470,10 +470,13 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         card.layer.borderWidth = 0
         card.layer.add(border, forKey: "borderWidth")
 
+        // Keep the grid opaque behind the growing card: the live tab is already mounted
+        // behind it, so fading the grid here would reveal the tab early as a duplicate of
+        // the card. It's uncovered only at the end, when the card is full-screen and both
+        // the card and the grid are removed together.
         UIView.animate(withDuration: 0.34, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.2,
                        options: [.allowUserInteraction]) {
             card.frame = self.view.bounds
-            switcher.view.alpha = 0
         } completion: { _ in
             card.removeFromSuperview()
             tearDown()
