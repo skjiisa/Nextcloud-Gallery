@@ -49,6 +49,10 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// True while the close animation is running, so a repeat close (or a lift that slips
     /// through during it) can't kick off a second teardown.
     private var closingSwitcher = false
+    /// Last switcher visibility the observer acted on. The observer dedupes against this so
+    /// an incidental observable read inside present/dismiss (e.g. a tab snapshot refreshed
+    /// by the next lift) can't re-fire it and tear the switcher back down spuriously.
+    private var lastSwitcherShown = false
     /// Where the finger gripped the card as a fraction of the full-screen card (captured at
     /// lift-off), so the card stays pinned under the finger as it shrinks and floats around.
     private var liftGrip: CGPoint = .zero
@@ -104,7 +108,14 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
         switcherObservation = observeChanges { [weak self] in
             guard let self else { return }
-            self.syncSwitcher(self.tabs.isShowingSwitcher)
+            // Read (and therefore track) ONLY the flag. Dedupe so a re-fire caused by an
+            // incidental observable read inside present/dismiss — e.g. `snapshotActiveTab()`
+            // mutating a tracked snapshot during the next lift — is ignored instead of
+            // dismissing the switcher the lift just opened.
+            let show = self.tabs.isShowingSwitcher
+            guard show != self.lastSwitcherShown else { return }
+            self.lastSwitcherShown = show
+            self.syncSwitcher(show)
         }
         settingsObservation = observeChanges { [weak self] in
             guard let self else { return }
