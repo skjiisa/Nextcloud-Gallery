@@ -58,11 +58,31 @@ final class BrowseNavController: UIViewController {
     /// Whichever bar is currently on screen for this tab — the viewer's while a photo is
     /// open, otherwise the browse bar.
     private var activeBar: GlassTabBar { photoViewer?.liftBar ?? bar }
-    /// The current lift of this tab's on-screen bar, captured into its snapshot at lift-off.
-    var currentBarLift: CGFloat { activeBar.currentLift }
-    /// Springs this tab's on-screen bar down from `lift` to rest, so reopening the tab lands
-    /// the bar smoothly from where its snapshot captured it.
-    func settleBar(fromLift lift: CGFloat) { activeBar.settle(fromLift: lift) }
+
+    /// A snapshot of this tab's content WITHOUT the bar, so the bar is never baked into the
+    /// switcher card/cell — it's animated separately instead. The browse bar is a *sibling*
+    /// of the nav stack, so rendering the nav stack alone excludes it cleanly; the viewer
+    /// renders its own content (its bar lives inside it).
+    func contentSnapshot() -> UIImage? {
+        if let viewer = photoViewer { return viewer.contentSnapshot() }
+        return WindowSnapshot.render(navController.view)
+    }
+
+    /// A snapshot of the bar plus its on-screen frame in `space`, used for the fade-out
+    /// "ghost" overlaid at lift-off (so the bar dissolves in place rather than vanishing).
+    func barGhost(in space: UICoordinateSpace) -> (image: UIImage, frame: CGRect)? {
+        guard let image = WindowSnapshot.render(activeBar) else { return nil }
+        return (image, activeBar.convert(activeBar.bounds, to: space))
+    }
+
+    /// Fades the bar in from hidden (at rest) — used when reopening a tab so the bar appears
+    /// smoothly instead of popping in.
+    func fadeBarIn() {
+        activeBar.alpha = 0
+        UIView.animate(withDuration: 0.25, delay: 0.05, options: [.allowUserInteraction]) {
+            self.activeBar.alpha = 1
+        }
+    }
     private var viewerObservation: ObservationToken?
     /// True while the Gallery toggle's cross-dissolve is in flight, to ignore repeat
     /// taps until it settles.

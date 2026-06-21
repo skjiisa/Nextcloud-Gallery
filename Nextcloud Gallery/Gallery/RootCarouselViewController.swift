@@ -106,9 +106,9 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         switcherObservation = observeChanges { [weak self] in
             guard let self else { return }
             // Read (and therefore track) ONLY the flag. Dedupe so a re-fire caused by an
-            // incidental observable read inside present/dismiss — e.g. `snapshotActiveTab()`
-            // mutating a tracked snapshot during the next lift — is ignored instead of
-            // dismissing the switcher the lift just opened.
+            // incidental observable read inside present/dismiss — e.g. refreshing a tab's
+            // snapshot during the next lift — is ignored instead of dismissing the switcher
+            // the lift just opened.
             let show = self.tabs.isShowingSwitcher
             guard show != self.lastSwitcherShown else { return }
             self.lastSwitcherShown = show
@@ -191,8 +191,8 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         if !isDragging {
             isDragging = true
             selectionHaptic.prepare()
-            // Snapshot the active tab while it's still full-screen, for its card.
-            tabs.snapshotActiveTab()
+            // Snapshot the active tab (content only) while it's still full-screen, for its card.
+            tabs.activeTab.snapshot = controllers[tabs.activeTabID]?.contentSnapshot()
             mountNeighbours()
         }
         let active = tabs.activeIndex
@@ -253,16 +253,13 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         let startFrame = CGRect(x: offsetX, y: 0, width: view.bounds.width, height: view.bounds.height)
         liftGrip = CGPoint(x: (f.x - offsetX) / max(1, view.bounds.width), y: f.y / max(1, view.bounds.height))
 
-        // Snapshot for the card: render the active tab's own view. It's clean (no half-swiped
-        // neighbour or offset composite) and captures the bar at its current lifted position,
-        // so the card matches the live tab and the bar doesn't snap as the card takes over.
-        // Store it so the switcher cell the card lands on matches too.
-        if let nav = controllers[tabs.activeTabID], let rendered = renderSnapshot(of: nav.view) {
-            tabs.activeTab.snapshot = rendered
-            // Remember how far the bar was raised so reopening lands it smoothly to rest.
-            tabs.activeTab.snapshotBarLift = nav.currentBarLift
-        }
+        // Snapshot for the card: content only (no bar), so the bar is never baked in — it's
+        // captured separately as a "ghost" at its current lifted position and fades out on
+        // top as the content peels off. Both are taken before the carousel resets.
+        let nav = controllers[tabs.activeTabID]
+        if let content = nav?.contentSnapshot() { tabs.activeTab.snapshot = content }
         let snapshot = tabs.activeTab.snapshot
+        let barGhost = nav?.barGhost(in: view)
 
         // Capture any peeking neighbour (image + on-screen frame) before the carousel resets,
         // so it can fade out over the revealed grid instead of vanishing instantly.
@@ -313,6 +310,18 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         let card = makeFlyingCard(image: snapshot, frame: startFrame)
         view.addSubview(card)
         flyingCard = card
+
+        // The bar peels off as a ghost on top of the card and dissolves in place; the live
+        // bar (reset behind the card) fades back in when the tab is reopened.
+        if let (image, frame) = barGhost {
+            let barView = UIImageView(image: image)
+            barView.frame = frame
+            barView.isUserInteractionEnabled = false
+            view.addSubview(barView)
+            UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                barView.alpha = 0
+            } completion: { _ in barView.removeFromSuperview() }
+        }
     }
 
     func switcherLiftChanged(at location: CGPoint) {
@@ -418,13 +427,7 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
 
     /// Renders a view's current content to an image (used to fade a peeking neighbour out
     /// after the carousel resets it away).
-    private func renderSnapshot(of v: UIView) -> UIImage? {
-        guard v.bounds.width > 0, v.bounds.height > 0 else { return nil }
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = v.window?.screen.scale ?? 0   // 0 → device scale
-        let renderer = UIGraphicsImageRenderer(bounds: v.bounds, format: format)
-        return renderer.image { _ in v.drawHierarchy(in: v.bounds, afterScreenUpdates: false) }
-    }
+    private func renderSnapshot(of v: UIView) -> UIImage? { WindowSnapshot.render(v) }
 
     /// Springs the flying card to `target`, fading the active-cell selection ring in as it
     /// lands, then calls `completion`. Carries the release velocity into the spring.
@@ -500,6 +503,8 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// Pill-tap / VoiceOver open: no finger to carry a card, so just reveal the grid with
     /// a gentle scale-and-fade.
     private func presentSwitcherNonInteractive() {
+        // Refresh the active tab's card (content only) before the grid covers it.
+        tabs.activeTab.snapshot = controllers[tabs.activeTabID]?.contentSnapshot()
         let switcher = addSwitcherChild()
         switcher.view.layoutIfNeeded()
         guard !UIAccessibility.isReduceMotionEnabled else { return }
@@ -559,11 +564,9 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         } completion: { _ in
             card.removeFromSuperview()
             tearDown()
-            // The snapshot baked the bar in at its raised lift; place the live bar there to
-            // match the card we just removed, then spring it down so it lands smoothly.
-            let lift = self.tabs.activeTab.snapshotBarLift
-            if lift > 0 { self.controllers[self.tabs.activeTabID]?.settleBar(fromLift: lift) }
-            self.tabs.activeTab.snapshotBarLift = 0
+            // The bar isn't in the snapshot, so the revealed tab has none yet — fade the live
+            // bar in (at rest) so it appears smoothly rather than popping in.
+            self.controllers[self.tabs.activeTabID]?.fadeBarIn()
         }
     }
 

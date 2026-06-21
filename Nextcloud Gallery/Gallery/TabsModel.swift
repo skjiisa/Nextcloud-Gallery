@@ -155,19 +155,10 @@ final class TabsModel {
         save()
     }
 
-    /// Opens the switcher, first refreshing the live tab's card so it shows what
-    /// the user was just looking at.
+    /// Opens the switcher. The live tab's card is refreshed by the carousel coordinator
+    /// (which renders it content-only) as the switcher appears.
     func openSwitcher() {
-        snapshotActiveTab()
         isShowingSwitcher = true
-    }
-
-    /// Grabs a thumbnail of the on-screen (live) tab for its switcher card. Call
-    /// while the active tab is full-screen (switcher open, or a carousel drag
-    /// starting) — never once another surface has covered it.
-    func snapshotActiveTab() {
-        activeTab.snapshot = WindowSnapshot.capture()
-        activeTab.snapshotBarLift = 0   // captured with the bar at rest
     }
 
     // MARK: - Persistence

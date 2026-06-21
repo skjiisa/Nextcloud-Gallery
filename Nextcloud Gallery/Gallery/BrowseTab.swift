@@ -55,14 +55,10 @@ final class BrowseTab: Identifiable {
     /// transient, and a fade is used if the grid is gone.
     @ObservationIgnored weak var viewerSource: (any PhotoViewerTransitionSource)?
 
-    /// Last rendered snapshot of this tab, shown as its card in the switcher.
-    /// In-memory only; restored tabs fall back to a placeholder until first shown.
+    /// Last rendered snapshot of this tab (content only — the bar is animated separately),
+    /// shown as its card in the switcher. In-memory only; restored tabs fall back to a
+    /// placeholder until first shown.
     var snapshot: UIImage?
-
-    /// How far the tab bar was raised (points) in the current ``snapshot`` — captured at
-    /// lift-off so reopening the tab can land the bar smoothly from there to rest. 0 for
-    /// snapshots taken at rest. In-memory, observation-ignored (purely transient).
-    @ObservationIgnored var snapshotBarLift: CGFloat = 0
 
     init(
         id: UUID = UUID(),
