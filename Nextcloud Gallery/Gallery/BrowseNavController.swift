@@ -234,6 +234,15 @@ final class BrowseNavController: UIViewController {
             vc = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [client] in
                 try await client.albumPhotos(davPath: davPath)
             }
+        case .tag:
+            let tagId = route.path
+            vc = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [client] in
+                try await client.taggedFiles(tagId: tagId)
+            }
+        case .allAlbums:
+            vc = AllAlbumsViewController(environment: environment, client: client, navigator: self)
+        case .allTags:
+            vc = AllTagsViewController(environment: environment, client: client, navigator: self)
         }
         vc.additionalSafeAreaInsets.bottom = GlassTabBar.preferredHeight + 4
         return vc
@@ -302,12 +311,16 @@ final class BrowseNavController: UIViewController {
 // MARK: - GalleryNavigator
 
 extension BrowseNavController: GalleryNavigator {
-    func openFolder(_ route: FolderRoute) {
-        Task {
-            // A leaf opens straight into its flattened gallery; the Gallery toggle can
-            // still flip it to a browse grid.
-            let mode: BrowseRoute.Mode = await isLeafFolder(route) ? .flat : .browse
+    func openFolder(_ route: FolderRoute, mode: BrowseRoute.Mode?) {
+        if let mode {
             push(.folder(path: route.folderPath, title: route.title, account: route.account, mode: mode))
+            return
+        }
+        Task {
+            // No explicit mode: a leaf opens straight into its flattened gallery; the
+            // Gallery toggle can still flip it to a browse grid.
+            let resolved: BrowseRoute.Mode = await isLeafFolder(route) ? .flat : .browse
+            push(.folder(path: route.folderPath, title: route.title, account: route.account, mode: resolved))
         }
     }
 
@@ -321,6 +334,18 @@ extension BrowseNavController: GalleryNavigator {
 
     func openAlbum(_ album: Album) {
         push(.album(album, account: client.credentials.account))
+    }
+
+    func openTag(id: String, name: String) {
+        push(.tag(id: id, name: name, account: client.credentials.account))
+    }
+
+    func openAllAlbums() {
+        push(.allAlbums(account: client.credentials.account))
+    }
+
+    func openAllTags() {
+        push(.allTags(account: client.credentials.account))
     }
 
     func openViewer(photos: [PhotoItem], initialID: String, source: (any PhotoViewerTransitionSource)?) {

@@ -127,8 +127,16 @@ final class RemoteGalleryViewController: UIViewController {
             guard let self else { return }
             cell.configure(with: item, fill: self.browseTab.aspectFill, cornerRadius: self.browseTab.zoom.cornerRadius, store: self.thumbnailStore, client: self.client)
         }
+        // Favorites can include folders; render those as folder tiles.
+        let folderCell = UICollectionView.CellRegistration<FolderGridCell, GridItemSnapshot> { [weak self] cell, _, item in
+            guard let self else { return }
+            cell.configure(with: item, store: self.thumbnailStore, client: self.client)
+        }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { collectionView, indexPath, item in
-            collectionView.dequeueConfiguredReusableCell(using: photoCell, for: indexPath, item: item)
+            if item.isDirectory {
+                return collectionView.dequeueConfiguredReusableCell(using: folderCell, for: indexPath, item: item)
+            }
+            return collectionView.dequeueConfiguredReusableCell(using: photoCell, for: indexPath, item: item)
         }
     }
 
@@ -221,21 +229,37 @@ extension RemoteGalleryViewController: UICollectionViewDelegate, UICollectionVie
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
         guard let item = dataSource.itemIdentifier(for: indexPath) else { return }
-        let photos = items.map(PhotoItem.init(snapshot:))
+        if item.isDirectory {
+            navigator?.openFolder(FolderRoute(folderPath: item.fullPath, title: item.fileName, account: account), mode: nil)
+            return
+        }
+        let photos = items.filter { !$0.isDirectory }.map(PhotoItem.init(snapshot:))
         navigator?.openViewer(photos: photos, initialID: item.ocId, source: self)
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
         for indexPath in indexPaths {
-            guard let item = dataSource.itemIdentifier(for: indexPath), item.hasPreview else { continue }
-            ImageLoader.shared.prefetch(ocId: item.ocId, fileId: item.fileId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels, store: thumbnailStore, client: client)
+            guard let item = dataSource.itemIdentifier(for: indexPath) else { continue }
+            if item.isDirectory {
+                for tile in item.coverTiles {
+                    ImageLoader.shared.prefetch(ocId: tile.ocId, fileId: tile.fileId, etag: tile.etag, pixels: NextcloudConfig.coverTilePixels, store: thumbnailStore, client: client)
+                }
+            } else if item.hasPreview {
+                ImageLoader.shared.prefetch(ocId: item.ocId, fileId: item.fileId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels, store: thumbnailStore, client: client)
+            }
         }
     }
 
     func collectionView(_ collectionView: UICollectionView, cancelPrefetchingForItemsAt indexPaths: [IndexPath]) {
         for indexPath in indexPaths {
-            guard let item = dataSource.itemIdentifier(for: indexPath), item.hasPreview else { continue }
-            ImageLoader.shared.cancelPrefetch(ocId: item.ocId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels)
+            guard let item = dataSource.itemIdentifier(for: indexPath) else { continue }
+            if item.isDirectory {
+                for tile in item.coverTiles {
+                    ImageLoader.shared.cancelPrefetch(ocId: tile.ocId, etag: tile.etag, pixels: NextcloudConfig.coverTilePixels)
+                }
+            } else if item.hasPreview {
+                ImageLoader.shared.cancelPrefetch(ocId: item.ocId, etag: item.etag, pixels: NextcloudConfig.gridThumbnailPixels)
+            }
         }
     }
 }

@@ -107,37 +107,25 @@ final class PhotoGridCell: UICollectionViewCell {
     }
 }
 
-// MARK: - Folder cell
+// MARK: - Folder cover artwork
 
-/// A square folder tile whose artwork is a 2x2 composite of photos from within the
-/// folder and its subtree, with the folder name along the bottom.
-final class FolderGridCell: UICollectionViewCell {
-    static let reuseID = "FolderGridCell"
-
-    private let placeholder = UIImageView(image: UIImage(systemName: "folder.fill"))
+/// A folder's artwork: a placeholder, a single cover, or a 2x2 composite, chosen by how
+/// many ``CoverTile``s it's given. Shared by the folder grid cell and Home's Browse
+/// button so both render folders identically. Fill it into a container.
+final class FolderCoverView: UIView {
+    private let placeholder = UIImageView()
     private let singleTile = ThumbnailImageView()
     private let gridTiles = (0..<4).map { _ in ThumbnailImageView() }
     private let gridContainer = UIView()
-    private let nameLabel = UILabel()
-    private let nameBackground = UIView()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        contentView.clipsToBounds = true
-        contentView.layer.cornerRadius = LayoutMetrics.tileCornerRadius
-        contentView.layer.cornerCurve = .continuous
-        contentView.backgroundColor = .quaternarySystemFill
-
-        // Placeholder (no cover yet).
         placeholder.tintColor = .secondaryLabel
         placeholder.contentMode = .scaleAspectFit
         placeholder.preferredSymbolConfiguration = .init(pointSize: 34)
         addFilling(placeholder)
-
-        // Single-tile cover.
         addFilling(singleTile)
 
-        // 2x2 cover.
         let rows = UIStackView(arrangedSubviews: [
             rowStack(gridTiles[0], gridTiles[1]),
             rowStack(gridTiles[2], gridTiles[3]),
@@ -154,8 +142,83 @@ final class FolderGridCell: UICollectionViewCell {
             rows.trailingAnchor.constraint(equalTo: gridContainer.trailingAnchor),
         ])
         addFilling(gridContainer)
+    }
 
-        // Name label along the bottom over a scrim.
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func configure(coverTiles: [CoverTile], placeholderSymbol: String, pixels: Int, store: ThumbnailStore, client: NextcloudClient) {
+        placeholder.image = UIImage(systemName: placeholderSymbol)
+        switch coverTiles.count {
+        case 0:
+            placeholder.isHidden = false
+            singleTile.isHidden = true
+            gridContainer.isHidden = true
+        case 1:
+            placeholder.isHidden = true
+            singleTile.isHidden = false
+            gridContainer.isHidden = true
+            singleTile.load(ocId: coverTiles[0].ocId, fileId: coverTiles[0].fileId, etag: coverTiles[0].etag, pixels: pixels, store: store, client: client)
+        default:
+            placeholder.isHidden = true
+            singleTile.isHidden = true
+            gridContainer.isHidden = false
+            for (index, view) in gridTiles.enumerated() {
+                if index < coverTiles.count {
+                    view.load(ocId: coverTiles[index].ocId, fileId: coverTiles[index].fileId, etag: coverTiles[index].etag, pixels: pixels, store: store, client: client)
+                } else {
+                    view.showBlank()
+                }
+            }
+        }
+    }
+
+    func prepareForReuse() {
+        singleTile.prepareForReuse()
+        gridTiles.forEach { $0.prepareForReuse() }
+    }
+
+    private func rowStack(_ a: ThumbnailImageView, _ b: ThumbnailImageView) -> UIStackView {
+        let stack = UIStackView(arrangedSubviews: [a, b])
+        stack.axis = .horizontal
+        stack.spacing = 1
+        stack.distribution = .fillEqually
+        return stack
+    }
+
+    private func addFilling(_ view: UIView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: topAnchor),
+            view.bottomAnchor.constraint(equalTo: bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+    }
+}
+
+// MARK: - Folder cell
+
+/// A square folder tile whose artwork is a ``FolderCoverView`` (a 2x2 composite of
+/// photos from within the folder), with the folder name along the bottom.
+final class FolderGridCell: UICollectionViewCell {
+    static let reuseID = "FolderGridCell"
+
+    private let cover = FolderCoverView()
+    private let nameLabel = UILabel()
+    private let nameBackground = UIView()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.clipsToBounds = true
+        contentView.layer.cornerRadius = LayoutMetrics.tileCornerRadius
+        contentView.layer.cornerCurve = .continuous
+        contentView.backgroundColor = .quaternarySystemFill
+
+        cover.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(cover)
+
         nameBackground.backgroundColor = UIColor.black.withAlphaComponent(0.35)
         nameBackground.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(nameBackground)
@@ -165,6 +228,10 @@ final class FolderGridCell: UICollectionViewCell {
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
         nameBackground.addSubview(nameLabel)
         NSLayoutConstraint.activate([
+            cover.topAnchor.constraint(equalTo: contentView.topAnchor),
+            cover.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            cover.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            cover.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             nameBackground.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             nameBackground.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             nameBackground.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -181,59 +248,13 @@ final class FolderGridCell: UICollectionViewCell {
     func configure(with item: GridItemSnapshot, store: ThumbnailStore, client: NextcloudClient) {
         nameLabel.text = item.fileName
         GalleryTile.applyHoverStyle(to: self, cornerRadius: LayoutMetrics.tileCornerRadius)
-
-        let tiles = item.coverTiles
-        let pixels = NextcloudConfig.coverTilePixels
-
-        switch tiles.count {
-        case 0:
-            placeholder.isHidden = false
-            singleTile.isHidden = true
-            gridContainer.isHidden = true
-        case 1:
-            placeholder.isHidden = true
-            singleTile.isHidden = false
-            gridContainer.isHidden = true
-            singleTile.load(ocId: tiles[0].ocId, fileId: tiles[0].fileId, etag: tiles[0].etag, pixels: pixels, store: store, client: client)
-        default:
-            placeholder.isHidden = true
-            singleTile.isHidden = true
-            gridContainer.isHidden = false
-            for (index, view) in gridTiles.enumerated() {
-                if index < tiles.count {
-                    view.load(ocId: tiles[index].ocId, fileId: tiles[index].fileId, etag: tiles[index].etag, pixels: pixels, store: store, client: client)
-                } else {
-                    view.showBlank()
-                }
-            }
-        }
+        cover.configure(coverTiles: item.coverTiles, placeholderSymbol: "folder.fill",
+                        pixels: NextcloudConfig.coverTilePixels, store: store, client: client)
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        singleTile.prepareForReuse()
-        gridTiles.forEach { $0.prepareForReuse() }
-    }
-
-    // MARK: helpers
-
-    private func rowStack(_ a: ThumbnailImageView, _ b: ThumbnailImageView) -> UIStackView {
-        let stack = UIStackView(arrangedSubviews: [a, b])
-        stack.axis = .horizontal
-        stack.spacing = 1
-        stack.distribution = .fillEqually
-        return stack
-    }
-
-    private func addFilling(_ view: UIView) {
-        view.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: contentView.topAnchor),
-            view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-        ])
+        cover.prepareForReuse()
     }
 }
 
