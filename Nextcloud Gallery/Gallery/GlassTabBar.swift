@@ -17,6 +17,8 @@
 //                  *lifts off the bar* (haptic bump) into a card the finger carries —
 //                  the switcher grid is revealed behind it — and on release the card
 //                  springs into its slot in the grid (see ``RootCarouselViewController``).
+//                  Carrying it back below the threshold and releasing cancels the lift and
+//                  keeps the current tab open.
 //                  A drag that never crosses the threshold is resolved on RELEASE by
 //                  where it was *heading* (end position projected forward by release
 //                  velocity, so a quick flick counts): sideways past the carousel
@@ -62,6 +64,9 @@ final class GlassTabBar: UIView {
     /// The finger let go while carrying the lifted tab: `(location, velocity)` in window
     /// space / pts-per-sec, so the coordinator can fling the card into its switcher slot.
     var onSwitcherLiftEnded: ((CGPoint, CGPoint) -> Void)?
+    /// The lifted tab was carried back below the threshold and released — abandon the lift
+    /// and keep the current tab open.
+    var onSwitcherLiftCancelled: (() -> Void)?
 
     static let preferredHeight: CGFloat = 56
 
@@ -306,15 +311,21 @@ final class GlassTabBar: UIView {
 
         case .ended:
             if liftedOff {
-                onSwitcherLiftEnded?(loc, recognizer.velocity(in: window))
+                // Above the threshold → open the switcher; carried back below it → cancel
+                // and keep the current tab open.
+                if up >= liftThreshold {
+                    onSwitcherLiftEnded?(loc, recognizer.velocity(in: window))
+                } else {
+                    onSwitcherLiftCancelled?()
+                }
             } else {
                 commit(up: up, side: side, location: loc, velocity: recognizer.velocity(in: window))
             }
 
         case .cancelled, .failed:
             if liftedOff {
-                // Resolve the lift into the switcher rather than leaving the card stranded.
-                onSwitcherLiftEnded?(loc, .zero)
+                // A system-cancelled lift keeps the current tab (never opens the switcher).
+                onSwitcherLiftCancelled?()
             } else {
                 springBarDown()
                 onDragEnded?(0, 0)

@@ -35,6 +35,9 @@ protocol CarouselDragHandling: AnyObject {
     /// The finger let go carrying the lifted card: fling it into its switcher slot from
     /// `location` with `velocity` (both window space / pts-per-sec).
     func switcherLiftEnded(at location: CGPoint, velocity: CGPoint)
+    /// The lift came back below the threshold before release — abandon it and keep the
+    /// current tab open.
+    func switcherLiftCancelled()
 }
 
 final class BrowseNavController: UIViewController {
@@ -168,6 +171,7 @@ final class BrowseNavController: UIViewController {
         bar.onSwitcherLiftBegan = { [weak self] loc in self?.dragHandler?.switcherLiftBegan(at: loc) }
         bar.onSwitcherLiftChanged = { [weak self] loc in self?.dragHandler?.switcherLiftChanged(at: loc) }
         bar.onSwitcherLiftEnded = { [weak self] loc, v in self?.dragHandler?.switcherLiftEnded(at: loc, velocity: v) }
+        bar.onSwitcherLiftCancelled = { [weak self] in self?.dragHandler?.switcherLiftCancelled() }
         view.addSubview(bar)
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),

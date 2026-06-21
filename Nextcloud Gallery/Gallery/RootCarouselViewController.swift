@@ -56,9 +56,6 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// Where the finger gripped the card as a fraction of the full-screen card (captured at
     /// lift-off), so the card stays pinned under the finger as it shrinks and floats around.
     private var liftGrip: CGPoint = .zero
-    /// How far the lifted tab has shrunk: 0 (full-screen) → 1 (held card). Latched so it
-    /// only shrinks — once lifted into a card it stays a card while you float it anywhere.
-    private var liftProgress: CGFloat = 0
     /// The active tab's grid-slot frame (root-view space), captured at lift-off — where the
     /// floating card drops on release.
     private var liftTarget: CGRect = .zero
@@ -244,7 +241,6 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     func switcherLiftBegan(at location: CGPoint) {
         guard switcherVC == nil, !closingSwitcher else { return }
         liftActive = true
-        liftProgress = 0
         flyingCard?.removeFromSuperview()   // defensive: never stack two cards
         flyingCard = nil
         let f = view.convert(location, from: nil)
@@ -314,14 +310,48 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
     }
 
+    /// The lift was released below the threshold — keep the current tab open. Settle the
+    /// card back to full-screen over the (still-opaque) grid, then drop both, revealing the
+    /// unchanged live tab. `isShowingSwitcher` never flipped, so the switcher is torn down
+    /// directly here (mirrors `dismissSwitcher`'s guards so a re-entrant gesture can't race).
+    func switcherLiftCancelled() {
+        guard liftActive, let switcher = switcherVC, !closingSwitcher else { return }
+        liftActive = false
+        closingSwitcher = true
+        let card = flyingCard
+        flyingCard = nil
+
+        let tearDown = {
+            self.closingSwitcher = false
+            self.switcherVC = nil
+            switcher.willMove(toParent: nil)
+            switcher.view.removeFromSuperview()
+            switcher.removeFromParent()
+        }
+        guard let card, !UIAccessibility.isReduceMotionEnabled else {
+            card?.removeFromSuperview()
+            tearDown()
+            return
+        }
+        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.2,
+                       options: [.allowUserInteraction]) {
+            card.frame = self.view.bounds
+        } completion: { _ in
+            card.removeFromSuperview()
+            tearDown()
+        }
+    }
+
     /// The floating card's frame for a finger at `point` (root-view space): sized by how far
     /// it's been lifted (full-screen → `heldScale`, latched so it only shrinks) and
     /// positioned so the original grip point stays under the finger.
     private func heldFrame(under point: CGPoint) -> CGRect {
         let bounds = view.bounds
         let risen = max(0, liftGrip.y * bounds.height - point.y)
-        liftProgress = max(liftProgress, min(risen / (bounds.height * 0.32), 1))
-        let scale = 1 - (1 - heldScale) * liftProgress
+        // Size tracks height directly (no latch): pull up to shrink, bring back down to
+        // grow again — full-screen at/below the lift-off point.
+        let progress = min(risen / (bounds.height * 0.32), 1)
+        let scale = 1 - (1 - heldScale) * progress
         let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
         let origin = CGPoint(x: point.x - liftGrip.x * size.width, y: point.y - liftGrip.y * size.height)
         return CGRect(origin: origin, size: size)
