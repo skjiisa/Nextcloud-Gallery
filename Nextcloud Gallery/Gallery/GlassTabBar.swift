@@ -13,12 +13,15 @@
 //   • drag       → the bar follows your finger in BOTH axes at once: it slides the
 //                  carousel as you move sideways and lifts (with resistance) as you
 //                  pull up. Nothing is axis-locked, so a curved or diagonal swipe is
-//                  fine — the action is decided on RELEASE by where the swipe was
-//                  *heading* (its end position projected forward by its release
-//                  velocity, so a quick flick counts): up past the lift threshold
-//                  opens the switcher, sideways past the carousel threshold changes
-//                  tabs, otherwise everything springs back. A haptic bump fires
-//                  whenever you're in switcher-opening territory.
+//                  fine. The moment an up-swipe crosses the lift threshold the tab
+//                  *lifts off the bar* (haptic bump) into a card the finger carries —
+//                  the switcher grid is revealed behind it — and on release the card
+//                  springs into its slot in the grid (see ``RootCarouselViewController``).
+//                  A drag that never crosses the threshold is resolved on RELEASE by
+//                  where it was *heading* (end position projected forward by release
+//                  velocity, so a quick flick counts): sideways past the carousel
+//                  threshold changes tabs, a projected up-flick opens the switcher with
+//                  the same flight from full screen, otherwise everything springs back.
 //
 //  VoiceOver: the pill activates to the switcher and carries rotor custom actions for
 //  new / next / previous / close tab, since none of the above gestures are reachable
@@ -49,13 +52,16 @@ final class GlassTabBar: UIView {
     /// `(translation, velocity)` of the horizontal drag at release, in window points /
     /// pts-per-sec, so the carousel can flick-switch and continue the momentum.
     var onDragEnded: ((CGFloat, CGFloat) -> Void)?
-    /// When a drag resolves to opening the switcher: park the carousel at the active
-    /// tab *instantly* so the card snapshot is clean, remembering where the finger
-    /// left it. Paired with `onBounceToRest`.
-    var onParkForSnapshot: (() -> Void)?
-    /// Spring the carousel from where the finger left it back to the active tab, so the
-    /// reset reads as a bounce rather than a pop. Runs right after the snapshot.
-    var onBounceToRest: (() -> Void)?
+    /// The up-swipe crossed the lift threshold: the tab lifts off the bar to be carried
+    /// by the finger into the switcher. The point is the finger's location in window
+    /// space so the coordinator can spring the card up under it.
+    var onSwitcherLiftBegan: ((CGPoint) -> Void)?
+    /// The finger moved while carrying the lifted tab (window-space location), so the
+    /// coordinator can track the card to it.
+    var onSwitcherLiftChanged: ((CGPoint) -> Void)?
+    /// The finger let go while carrying the lifted tab: `(location, velocity)` in window
+    /// space / pts-per-sec, so the coordinator can fling the card into its switcher slot.
+    var onSwitcherLiftEnded: ((CGPoint, CGPoint) -> Void)?
 
     static let preferredHeight: CGFloat = 56
 
@@ -78,14 +84,16 @@ final class GlassTabBar: UIView {
     /// "Close Other Tabs" when there's only one.
     private var tabCount = 1
 
-    // Drag state. The pan follows both axes freely; the only latched bit of state is
-    // whether the sideways move has grown enough to start driving the carousel (so a
-    // near-vertical swipe doesn't needlessly mount neighbour pages).
+    // Drag state. The pan follows both axes freely. Two latched bits: whether the
+    // sideways move has grown enough to start driving the carousel (so a near-vertical
+    // swipe doesn't needlessly mount neighbour pages), and whether the up-swipe has
+    // crossed the threshold and handed the tab off to the lift coordinator — once lifted
+    // off, the pan only feeds the flying card, and release always lands it in the switcher.
     private var carouselEngaged = false
+    private var liftedOff = false
     private static let carouselSlop: CGFloat = 10
     private let liftThreshold: CGFloat = 72
     private let maxLift: CGFloat = 92
-    private var hapticArmed = false
     private let haptic = UIImpactFeedbackGenerator(style: .medium)
 
     override init(frame: CGRect) {
@@ -271,41 +279,66 @@ final class GlassTabBar: UIView {
         // Window space: the bar rides the carousel + its own lift, so only the touch's
         // own translation is a clean read of how far the finger has moved.
         let t = recognizer.translation(in: window)
+        let loc = recognizer.location(in: window)
         let up = max(0, -t.y)       // how far up (the bar only lifts upward)
         let side = t.x              // signed sideways travel
 
         switch recognizer.state {
         case .began:
             carouselEngaged = false
-            hapticArmed = false
+            liftedOff = false
             haptic.prepare()
 
         case .changed:
+            // Once the tab has lifted off, the pan only carries the flying card; the bar
+            // is out of it (already springing back down).
+            if liftedOff { onSwitcherLiftChanged?(loc); break }
             // Drive both axes at once so the bar tracks the finger wherever it goes;
             // the carousel only kicks in once there's a real sideways intent.
             if !carouselEngaged, abs(side) > Self.carouselSlop { carouselEngaged = true }
             if carouselEngaged { onDragChanged?(side) }
-            applyLift(up)
-            updateLiftHaptic(up: up, side: abs(side))
+            // Up-swipe winning and past the threshold → lift the tab off into the finger.
+            if up >= liftThreshold, up >= abs(side) {
+                liftOff(at: loc)
+            } else {
+                applyLift(up)
+            }
 
         case .ended:
-            commit(up: up, side: side, velocity: recognizer.velocity(in: window))
+            if liftedOff {
+                onSwitcherLiftEnded?(loc, recognizer.velocity(in: window))
+            } else {
+                commit(up: up, side: side, location: loc, velocity: recognizer.velocity(in: window))
+            }
 
         case .cancelled, .failed:
-            // No commit on a system-cancelled gesture — just settle everything back.
-            springBarDown()
-            onDragEnded?(0, 0)
+            if liftedOff {
+                // Resolve the lift into the switcher rather than leaving the card stranded.
+                onSwitcherLiftEnded?(loc, .zero)
+            } else {
+                springBarDown()
+                onDragEnded?(0, 0)
+            }
 
         default:
             break
         }
     }
 
-    /// Resolves a finished drag by where it was *heading*, not how it started: the end
-    /// position is projected forward by the release velocity (so a quick flick counts
-    /// even on little travel), then the dominant projected axis wins if it clears its
-    /// threshold.
-    private func commit(up: CGFloat, side: CGFloat, velocity: CGPoint) {
+    /// Hands the tab off to the lift coordinator: a haptic bump, the bar settles back
+    /// down as the tab leaves it, and the finger now carries the flying card.
+    private func liftOff(at location: CGPoint) {
+        liftedOff = true
+        haptic.impactOccurred()
+        springBarDown()
+        onSwitcherLiftBegan?(location)
+    }
+
+    /// Resolves a finished drag (one that never lifted off) by where it was *heading*,
+    /// not how it started: the end position is projected forward by the release velocity
+    /// (so a quick flick counts even on little travel), then the dominant projected axis
+    /// wins if it clears its threshold.
+    private func commit(up: CGFloat, side: CGFloat, location: CGPoint, velocity: CGPoint) {
         let glide: CGFloat = 0.2   // ~a fifth of a second of coast, matching the carousel
         let projUp = up + max(0, -velocity.y) * glide
         let projSide = side + velocity.x * glide
@@ -313,20 +346,12 @@ final class GlassTabBar: UIView {
         if projUp >= abs(projSide) {
             // Up-swipe (or up-flick) wins.
             if projUp >= liftThreshold {
-                // Open the switcher. A flick may not have armed the predictive bump, so
-                // fire it now.
-                if !hapticArmed { haptic.impactOccurred() }
-                // Park the bar and carousel at rest just long enough to take a clean
-                // card snapshot — this whole block runs in one turn of the run loop, so
-                // no in-between frame is ever drawn — then let both BOUNCE home from
-                // where the finger left them instead of popping.
-                let lifted = transform
-                transform = .identity
-                onParkForSnapshot?()
-                onShowTabs?()           // captures the card, then presents the switcher
-                transform = lifted
+                // A flick that crossed the threshold only by projection never physically
+                // lifted off — open the switcher with the same flight, from full screen.
+                haptic.impactOccurred()
                 springBarDown()
-                onBounceToRest?()
+                onSwitcherLiftBegan?(location)
+                onSwitcherLiftEnded?(location, velocity)
             } else {
                 springBarDown()
                 onDragEnded?(0, 0)   // settle the carousel back on the active tab
@@ -344,19 +369,6 @@ final class GlassTabBar: UIView {
     private func applyLift(_ up: CGFloat) {
         let lift = maxLift * (1 - exp(-up / maxLift))
         transform = CGAffineTransform(translationX: 0, y: -lift)
-    }
-
-    /// Fires a single haptic bump exactly while releasing *would* open the switcher —
-    /// i.e. the up-swipe is both winning and past the threshold — so the bump always
-    /// predicts the outcome, even mid-diagonal.
-    private func updateLiftHaptic(up: CGFloat, side: CGFloat) {
-        let willOpenSwitcher = up >= liftThreshold && up >= side
-        if willOpenSwitcher, !hapticArmed {
-            haptic.impactOccurred()
-            hapticArmed = true
-        } else if !willOpenSwitcher {
-            hapticArmed = false
-        }
     }
 
     /// Settles the lifted bar back down — a soft spring, or a brief fade under Reduce

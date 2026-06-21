@@ -176,8 +176,9 @@ final class PhotoViewerController: UIViewController {
         tabBar.onLockToggle = { [weak self] in self?.toggleZoomLock() }
         tabBar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
         tabBar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
-        tabBar.onParkForSnapshot = { [weak self] in self?.dragHandler?.carouselParkForSnapshot() }
-        tabBar.onBounceToRest = { [weak self] in self?.dragHandler?.carouselBounceToActive() }
+        tabBar.onSwitcherLiftBegan = { [weak self] loc in self?.dragHandler?.switcherLiftBegan(at: loc) }
+        tabBar.onSwitcherLiftChanged = { [weak self] loc in self?.dragHandler?.switcherLiftChanged(at: loc) }
+        tabBar.onSwitcherLiftEnded = { [weak self] loc, v in self?.dragHandler?.switcherLiftEnded(at: loc, velocity: v) }
 
         view.addSubview(tabBar)
         view.addSubview(topBar)

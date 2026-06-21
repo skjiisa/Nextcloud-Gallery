@@ -19,19 +19,22 @@
 
 import UIKit
 
-/// Receives a tab bar's horizontal drag so the carousel can slide between tabs.
+/// Receives a tab bar's drag: horizontal to slide the carousel between tabs, and the
+/// up-swipe lift that carries the active tab off into the switcher.
 @MainActor
 protocol CarouselDragHandling: AnyObject {
     func carouselDragChanged(translation: CGFloat)
     /// `velocity` is the finger's horizontal speed (pts/sec) at release, so a quick
     /// flick can switch tabs on little travel and carry its momentum into the snap.
     func carouselDragEnded(translation: CGFloat, velocity: CGFloat)
-    /// Park the carousel at the active tab *immediately* (no animation) so a card
-    /// snapshot taken now is clean, remembering where the finger left it.
-    func carouselParkForSnapshot()
-    /// Spring the carousel from the parked position back to the active tab, so a drag
-    /// that opens the switcher bounces home instead of popping. Pairs with the above.
-    func carouselBounceToActive()
+    /// The active tab lifted off the bar: snapshot it, reveal the switcher behind, and
+    /// spring its card up under the finger (window-space `location`).
+    func switcherLiftBegan(at location: CGPoint)
+    /// The finger carrying the lifted card moved to `location` (window space).
+    func switcherLiftChanged(at location: CGPoint)
+    /// The finger let go carrying the lifted card: fling it into its switcher slot from
+    /// `location` with `velocity` (both window space / pts-per-sec).
+    func switcherLiftEnded(at location: CGPoint, velocity: CGPoint)
 }
 
 final class BrowseNavController: UIViewController {
@@ -162,8 +165,9 @@ final class BrowseNavController: UIViewController {
         bar.onPrevTab = { [weak self] in self?.tabsModel.selectPrevious() }
         bar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
         bar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
-        bar.onParkForSnapshot = { [weak self] in self?.dragHandler?.carouselParkForSnapshot() }
-        bar.onBounceToRest = { [weak self] in self?.dragHandler?.carouselBounceToActive() }
+        bar.onSwitcherLiftBegan = { [weak self] loc in self?.dragHandler?.switcherLiftBegan(at: loc) }
+        bar.onSwitcherLiftChanged = { [weak self] loc in self?.dragHandler?.switcherLiftChanged(at: loc) }
+        bar.onSwitcherLiftEnded = { [weak self] loc, v in self?.dragHandler?.switcherLiftEnded(at: loc, velocity: v) }
         view.addSubview(bar)
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
