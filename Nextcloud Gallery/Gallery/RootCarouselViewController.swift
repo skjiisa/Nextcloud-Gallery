@@ -244,16 +244,23 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         flyingCard?.removeFromSuperview()   // defensive: never stack two cards
         flyingCard = nil
         let f = view.convert(location, from: nil)
-        // Remember where on the (full-screen) page the finger grabbed, so it stays pinned
-        // under the finger as the card shrinks. The finger starts low on the bar, so it
-        // grips near the card's bottom — the card rides up above it.
-        liftGrip = CGPoint(x: f.x / max(1, view.bounds.width), y: f.y / max(1, view.bounds.height))
 
-        // Park the carousel at the active tab and snapshot it for the flying card. Setting
-        // the transform and capturing happen in one run-loop turn, so no parked frame is
-        // ever drawn — the card starts as an exact copy of what's on screen.
+        // If a horizontal carousel drag is in progress the active tab is shifted partway
+        // off-frame. The card should peel off from *there*, showing the clean current tab —
+        // not the half-swiped composite (offset tab + peeking neighbour + offset bar). So
+        // measure the grip and the card's start frame against that horizontal offset.
+        let offsetX = container.transform.tx
+        let startFrame = CGRect(x: offsetX, y: 0, width: view.bounds.width, height: view.bounds.height)
+        liftGrip = CGPoint(x: (f.x - offsetX) / max(1, view.bounds.width), y: f.y / max(1, view.bounds.height))
+
+        // Snapshot for the card: at rest the window IS the clean tab; mid-drag it's the
+        // composite, so reuse the clean full-screen snapshot taken when the drag began (in
+        // `carouselDragChanged`) rather than capturing the half-swiped screen.
+        if !isDragging { tabs.snapshotActiveTab() }
+        let snapshot = tabs.activeTab.snapshot
+
+        // Park the carousel back on the active tab behind the (about-to-be-added) card.
         container.transform = .identity
-        tabs.snapshotActiveTab()
         isDragging = false
         rebuildActive()
 
@@ -272,11 +279,12 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
             return
         }
 
-        // The lifted tab starts exactly where it already is — full-screen — so nothing
-        // pops. From here it floats freely under the finger; release drops it into its slot.
+        // The card starts exactly where the tab is — full-size, at its current horizontal
+        // offset — so nothing pops. From here it floats under the finger; release drops it
+        // into its slot.
         liftTarget = switcher.cardFrame(forTab: tabs.activeTabID, in: view)
             ?? CGRect(x: view.bounds.midX - 77, y: 120, width: 154, height: 214)
-        let card = makeFlyingCard(image: tabs.activeTab.snapshot, frame: view.bounds)
+        let card = makeFlyingCard(image: snapshot, frame: startFrame)
         view.addSubview(card)
         flyingCard = card
     }
