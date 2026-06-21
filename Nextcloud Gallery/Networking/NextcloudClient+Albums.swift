@@ -155,6 +155,25 @@ extension NextcloudClient {
             .map { GridItemSnapshot(file: $0, account: account) }
     }
 
+    /// The file id of a representative image carrying the tag, for a cover thumbnail —
+    /// the first image in the `filter-files` REPORT (no resolve needed; preview-by-id
+    /// only needs the file id).
+    func tagCoverFileId(tagId: String) async throws -> String? {
+        let body = """
+        <?xml version="1.0"?>
+        <oc:filter-files xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
+          <d:prop><oc:fileid/><d:getcontenttype/></d:prop>
+          <oc:filter-rules><oc:systemtag>\(tagId)</oc:systemtag></oc:filter-rules>
+        </oc:filter-files>
+        """
+        let data = try await davRequest(method: "REPORT", urlString: WebDAVPath.normalized(filesRootPath) + "/", body: body)
+        for entry in WebDAVMultiStatus.parse(data) {
+            guard let id = entry.props["fileid"], !id.isEmpty else { continue }
+            if (entry.props["getcontenttype"] ?? "").hasPrefix("image/") { return id }
+        }
+        return nil
+    }
+
     // MARK: - Writing
 
     /// Creates a new, empty album.

@@ -242,7 +242,7 @@ final class BrowseNavController: UIViewController {
         case .allAlbums:
             vc = AllAlbumsViewController(environment: environment, client: client, navigator: self)
         case .allTags:
-            vc = AllTagsViewController(client: client, navigator: self)
+            vc = AllTagsViewController(environment: environment, client: client, navigator: self)
         }
         vc.additionalSafeAreaInsets.bottom = GlassTabBar.preferredHeight + 4
         return vc

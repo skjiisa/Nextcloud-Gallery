@@ -20,7 +20,7 @@ final class HomeViewController: UIViewController {
         case button(HomeButton)
         case favorite(GridItemSnapshot)
         case album(Album)
-        case tag(NKTag)
+        case tag(TagPreview)
     }
 
     /// A file-browser button on the Home row.
@@ -56,7 +56,10 @@ final class HomeViewController: UIViewController {
     private var buttons: [HomeButton] = []
     private var favorites: [GridItemSnapshot] = []
     private var albums: [Album] = []
-    private var tags: [NKTag] = []
+    private var tags: [TagPreview] = []
+    /// Cover tiles for the media folder: the first feeds the Gallery button's single
+    /// cover; all of them feed the Browse button's 2x2 folder composite.
+    private var mediaCoverTiles: [CoverTile] = []
     private var didInitialLoad = false
     private var mediaObserver: NSObjectProtocol?
 
@@ -96,9 +99,11 @@ final class HomeViewController: UIViewController {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.mediaCoverTiles = []
                 self.refreshButtons()
                 self.applySnapshot()
                 self.collectionView.collectionViewLayout.invalidateLayout()
+                Task { await self.refreshMediaCover() }
             }
         }
     }
@@ -160,7 +165,7 @@ final class HomeViewController: UIViewController {
         let itemWidth = (usable - spacing * CGFloat(count - 1)) / CGFloat(count)
         let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .absolute(itemWidth), heightDimension: .fractionalHeight(1)))
         let group = NSCollectionLayoutGroup.horizontal(
-            layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(92)),
+            layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(104)),
             subitems: [item]
         )
         group.interItemSpacing = .fixed(spacing)
@@ -195,7 +200,8 @@ final class HomeViewController: UIViewController {
     }
 
     private func tagsSection() -> NSCollectionLayoutSection {
-        stripSection(tile: CGSize(width: 90, height: 38), estimated: true, spacing: 8, bottom: 20)
+        // Tags are rendered like albums — cover tiles in a strip.
+        stripSection(tile: CGSize(width: 150, height: 150), estimated: false, spacing: 8, bottom: 20)
     }
 
     private func headerItem() -> NSCollectionLayoutBoundarySupplementaryItem {
@@ -208,8 +214,18 @@ final class HomeViewController: UIViewController {
     // MARK: - Data source
 
     private func configureDataSource() {
-        let buttonCell = UICollectionView.CellRegistration<HomeButtonCell, HomeButton> { cell, _, button in
-            cell.configure(icon: button.icon, title: button.title)
+        let buttonCell = UICollectionView.CellRegistration<HomeButtonCell, HomeButton> { [weak self] cell, _, button in
+            guard let self else { return }
+            // Gallery shows the media folder's newest photo; Browse shows its 2x2 folder
+            // composite; All Files / Set Media Folder show their SF icon.
+            let coverTiles: [CoverTile]
+            switch button {
+            case .mediaGallery: coverTiles = Array(self.mediaCoverTiles.prefix(1))
+            case .mediaFolder: coverTiles = self.mediaCoverTiles
+            default: coverTiles = []
+            }
+            cell.configure(icon: button.icon, title: button.title, coverTiles: coverTiles,
+                           asFolder: button == .mediaFolder, store: self.thumbnailStore, client: self.client)
         }
         let favoriteCell = UICollectionView.CellRegistration<PhotoGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }
@@ -224,8 +240,10 @@ final class HomeViewController: UIViewController {
             guard let self else { return }
             cell.configure(with: album, store: self.thumbnailStore, client: self.client)
         }
-        let tagCell = UICollectionView.CellRegistration<TagChipCell, NKTag> { cell, _, tag in
-            cell.configure(tag: tag)
+        let tagCell = UICollectionView.CellRegistration<AlbumGridCell, TagPreview> { [weak self] cell, _, preview in
+            guard let self else { return }
+            cell.configure(coverFileId: preview.coverFileId, name: preview.tag.name, subtitle: nil,
+                           placeholderSymbol: "tag.fill", store: self.thumbnailStore, client: self.client)
         }
 
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { collectionView, indexPath, item in
@@ -239,8 +257,8 @@ final class HomeViewController: UIViewController {
                 return collectionView.dequeueConfiguredReusableCell(using: favoriteCell, for: indexPath, item: snapshot)
             case .album(let album):
                 return collectionView.dequeueConfiguredReusableCell(using: albumCell, for: indexPath, item: album)
-            case .tag(let tag):
-                return collectionView.dequeueConfiguredReusableCell(using: tagCell, for: indexPath, item: tag)
+            case .tag(let preview):
+                return collectionView.dequeueConfiguredReusableCell(using: tagCell, for: indexPath, item: preview)
             }
         }
 
@@ -282,19 +300,42 @@ final class HomeViewController: UIViewController {
     }
 
     private func load() async {
-        // Favorites, albums, and tags are independent best-effort fetches; any can fail
-        // (or be empty) without affecting the others or the always-present buttons.
+        // Favorites, albums, tags, and the media cover are independent best-effort
+        // fetches; any can fail (or be empty) without affecting the always-present buttons.
         async let favoritesResult = client.favorites()
         async let albumsResult = client.listAlbums()
-        async let tagsResult = client.availableTags()
+        async let tagsResult = client.tagPreviews()
+        async let mediaCoverResult = fetchMediaCoverTiles()
         favorites = (try? await favoritesResult) ?? favorites
         albums = (try? await albumsResult) ?? albums
         tags = (try? await tagsResult) ?? tags
+        mediaCoverTiles = await mediaCoverResult
         refreshControl.endRefreshing()
         applySnapshot()
+        reconfigureButtons()   // surface the media covers on their buttons
     }
 
     @objc private func pullToRefresh() { Task { await load() } }
+
+    /// Up to 4 cover tiles for the current media folder (empty if none is set).
+    private func fetchMediaCoverTiles() async -> [CoverTile] {
+        guard let media = MediaFolder.path(account: account) else { return [] }
+        return (try? await client.folderCoverTiles(path: media, limit: 4)) ?? []
+    }
+
+    private func refreshMediaCover() async {
+        mediaCoverTiles = await fetchMediaCoverTiles()
+        reconfigureButtons()
+    }
+
+    /// Reconfigures the (unchanged) button items so their media covers refresh.
+    private func reconfigureButtons() {
+        var snapshot = dataSource.snapshot()
+        let items = buttons.map(Item.button).filter { snapshot.indexOfItem($0) != nil }
+        guard !items.isEmpty else { return }
+        snapshot.reconfigureItems(items)
+        dataSource.apply(snapshot, animatingDifferences: false)
+    }
 
     // MARK: - Actions
 
@@ -344,8 +385,8 @@ extension HomeViewController: UICollectionViewDelegate {
             }
         case .album(let album):
             navigator?.openAlbum(album)
-        case .tag(let tag):
-            navigator?.openTag(id: tag.id, name: tag.name)
+        case .tag(let preview):
+            navigator?.openTag(id: preview.tag.id, name: preview.tag.name)
         }
     }
 }

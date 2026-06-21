@@ -12,9 +12,9 @@ import Foundation
 import NextcloudKit
 
 extension GridItemSnapshot {
-    /// Builds a photo snapshot from a live server entry (a favorite or a resolved
-    /// album photo). Always a photo — no folder cover tiles.
-    init(file: NKFile, account: String) {
+    /// Builds a snapshot from a live server entry (a favorite, a resolved album photo,
+    /// or a favorited folder). `coverTiles` is the folder's 2x2 cover when known.
+    init(file: NKFile, account: String, coverTiles: [CoverTile] = []) {
         self.init(
             ocId: file.ocId,
             account: account,
@@ -26,7 +26,17 @@ extension GridItemSnapshot {
             width: Int(file.width),
             height: Int(file.height),
             fullPath: WebDAVPath.normalized(file.serverUrl + "/" + file.fileName),
-            coverTiles: []
+            coverTiles: coverTiles
+        )
+    }
+
+    /// A copy with `coverTiles` replaced — lets a folder snapshot (built off a
+    /// non-Sendable `NKFile`) gain its cover after a concurrent fetch.
+    func withCoverTiles(_ coverTiles: [CoverTile]) -> GridItemSnapshot {
+        GridItemSnapshot(
+            ocId: ocId, account: account, isDirectory: isDirectory, fileName: fileName,
+            fileId: fileId, etag: etag, hasPreview: hasPreview, width: width, height: height,
+            fullPath: fullPath, coverTiles: coverTiles
         )
     }
 }
