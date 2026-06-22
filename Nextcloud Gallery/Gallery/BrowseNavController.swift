@@ -108,9 +108,15 @@ final class BrowseNavController: UIViewController {
         let clamped = min(max(progress, 0), 1)
         activeBar.alpha = barAlpha
         guard clamped > 0.001 else { view.layer.mask = nil; return }
+        // The mask is a standalone CALayer, so frame/cornerRadius changes would otherwise pick up
+        // Core Animation's default 0.25s implicit animation and lag the finger — the crop trailing
+        // the container's (instant) UIView scale. Disable actions so the shape tracks the height.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         liftCropMask.frame = liftCropRect(progress: clamped)
         liftCropMask.cornerRadius = TabCardCell.cornerRadius * clamped / max(scale, 0.01)
         view.layer.mask = liftCropMask
+        CATransaction.commit()
     }
 
     /// Restores the bar alpha without touching the crop mask — used while the mask is being
