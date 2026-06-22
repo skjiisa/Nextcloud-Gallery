@@ -187,12 +187,9 @@ final class PhotoViewerController: UIViewController {
         tabBar.onNextTab = { [weak self] in self?.tabs.selectNext() }
         tabBar.onPrevTab = { [weak self] in self?.tabs.selectPrevious() }
         tabBar.onLockToggle = { [weak self] in self?.toggleZoomLock() }
-        tabBar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
-        tabBar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
-        tabBar.onSwitcherLiftBegan = { [weak self] loc in self?.dragHandler?.switcherLiftBegan(at: loc) }
-        tabBar.onSwitcherLiftChanged = { [weak self] loc in self?.dragHandler?.switcherLiftChanged(at: loc) }
-        tabBar.onSwitcherLiftEnded = { [weak self] loc, v in self?.dragHandler?.switcherLiftEnded(at: loc, velocity: v) }
-        tabBar.onSwitcherLiftCancelled = { [weak self] in self?.dragHandler?.switcherLiftCancelled() }
+        tabBar.onDrag = { [weak self] loc, up, side in self?.dragHandler?.dragChanged(at: loc, up: up, side: side) }
+        tabBar.onDragRelease = { [weak self] loc, up, side, v in self?.dragHandler?.dragEnded(at: loc, up: up, side: side, velocity: v) }
+        tabBar.onDragCancel = { [weak self] in self?.dragHandler?.dragCancelled() }
 
         view.addSubview(tabBar)
         view.addSubview(topBar)

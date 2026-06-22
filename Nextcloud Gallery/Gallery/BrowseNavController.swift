@@ -19,25 +19,21 @@
 
 import UIKit
 
-/// Receives a tab bar's drag: horizontal to slide the carousel between tabs, and the
-/// up-swipe lift that carries the active tab off into the switcher.
+/// Receives a tab bar's drag: a single continuous gesture that scrubs the carousel between
+/// tabs as it moves sideways and shrinks the active tab into a switcher card as it moves up,
+/// blending the two rather than switching modes.
 @MainActor
 protocol CarouselDragHandling: AnyObject {
-    func carouselDragChanged(translation: CGFloat)
-    /// `velocity` is the finger's horizontal speed (pts/sec) at release, so a quick
-    /// flick can switch tabs on little travel and carry its momentum into the snap.
-    func carouselDragEnded(translation: CGFloat, velocity: CGFloat)
-    /// The active tab lifted off the bar: snapshot it, reveal the switcher behind, and
-    /// spring its card up under the finger (window-space `location`).
-    func switcherLiftBegan(at location: CGPoint)
-    /// The finger carrying the lifted card moved to `location` (window space).
-    func switcherLiftChanged(at location: CGPoint)
-    /// The finger let go carrying the lifted card: fling it into its switcher slot from
-    /// `location` with `velocity` (both window space / pts-per-sec).
-    func switcherLiftEnded(at location: CGPoint, velocity: CGPoint)
-    /// The lift came back below the threshold before release — abandon it and keep the
-    /// current tab open.
-    func switcherLiftCancelled()
+    /// The bar drag moved: `location` (window space), `up` (points above the start) and `side`
+    /// (signed sideways travel). The coordinator folds both axes into one live transform —
+    /// sideways scrub + upward shrink at once — nothing commits yet.
+    func dragChanged(at location: CGPoint, up: CGFloat, side: CGFloat)
+    /// The finger let go: the coordinator commits whichever action the release crossed — open
+    /// the switcher (clearly up, past the lift threshold) or switch tabs (sideways, past the
+    /// carousel threshold) — or settles back. `velocity` is window-space pts/sec.
+    func dragEnded(at location: CGPoint, up: CGFloat, side: CGFloat, velocity: CGPoint)
+    /// The gesture was cancelled by the system — settle everything, commit nothing.
+    func dragCancelled()
 }
 
 final class BrowseNavController: UIViewController {
@@ -82,6 +78,80 @@ final class BrowseNavController: UIViewController {
         UIView.animate(withDuration: 0.25, delay: 0.05, options: [.allowUserInteraction]) {
             self.activeBar.alpha = 1
         }
+    }
+
+    /// A reusable mask that crops this page toward the switcher card's aspect as it lifts. The
+    /// tab becomes card-shaped by *cropping* top & bottom (an opaque, rounded window over the
+    /// live content) rather than squashing it — so the content stays undistorted, exactly like
+    /// the aspect-fill snapshot the switcher cell shows.
+    private lazy var liftCropMask: CALayer = {
+        let layer = CALayer()
+        layer.backgroundColor = UIColor.black.cgColor   // opaque == the visible region
+        layer.cornerCurve = .continuous
+        return layer
+    }()
+
+    /// The page-local rect the crop narrows to at `progress`: full bounds at 0, a centred
+    /// switcher-aspect (``TabCardCell/cardAspect``) window at 1.
+    private func liftCropRect(progress: CGFloat) -> CGRect {
+        let b = view.bounds
+        let cardHeight = b.width / TabCardCell.cardAspect
+        let height = b.height - (b.height - cardHeight) * min(max(progress, 0), 1)
+        return CGRect(x: 0, y: (b.height - height) / 2, width: b.width, height: height)
+    }
+
+    /// Crops + rounds this page into its lifted card shape and fades the bar. `progress` is 0 at
+    /// full-screen, 1 fully lifted; `scale` is the carousel's live shrink (divided out so the
+    /// on-screen corner radius stays constant); `barAlpha` fades the dragged bar away so the
+    /// card reads as chrome-free and the commit's bar-less snapshot swaps in without a pop.
+    func setLiftProgress(_ progress: CGFloat, scale: CGFloat, barAlpha: CGFloat) {
+        let clamped = min(max(progress, 0), 1)
+        activeBar.alpha = barAlpha
+        guard clamped > 0.001 else { view.layer.mask = nil; return }
+        liftCropMask.frame = liftCropRect(progress: clamped)
+        liftCropMask.cornerRadius = TabCardCell.cornerRadius * clamped / max(scale, 0.01)
+        view.layer.mask = liftCropMask
+    }
+
+    /// Restores the bar alpha without touching the crop mask — used while the mask is being
+    /// animated open separately (see ``animateLiftReset(duration:)``).
+    func setBarAlpha(_ alpha: CGFloat) { activeBar.alpha = alpha }
+
+    /// The on-screen frame (in `space`) of this page's cropped card at `progress` — where the
+    /// lift's flying snapshot starts, so the hand-off into the switcher is seamless.
+    func liftCardFrame(progress: CGFloat, in space: UICoordinateSpace) -> CGRect {
+        view.convert(liftCropRect(progress: progress), to: space)
+    }
+
+    /// Animates the crop open and drops the mask over `duration` (the carousel's settle). The
+    /// mask is a sublayer a `UIView` animation block won't touch, so it's animated by hand; the
+    /// caller's enclosing animation restores the bar + page alpha alongside.
+    func animateLiftReset(duration: TimeInterval) {
+        guard view.layer.mask === liftCropMask else { return }
+        let pres = liftCropMask.presentation() ?? liftCropMask
+        let fromBounds = pres.bounds, fromPosition = pres.position, fromRadius = pres.cornerRadius
+        liftCropMask.frame = liftCropRect(progress: 0)
+        liftCropMask.cornerRadius = 0
+        let bounds = CABasicAnimation(keyPath: "bounds")
+        bounds.fromValue = NSValue(cgRect: fromBounds)
+        bounds.toValue = NSValue(cgRect: liftCropMask.bounds)
+        let position = CABasicAnimation(keyPath: "position")
+        position.fromValue = NSValue(cgPoint: fromPosition)
+        position.toValue = NSValue(cgPoint: liftCropMask.position)
+        let radius = CABasicAnimation(keyPath: "cornerRadius")
+        radius.fromValue = fromRadius
+        radius.toValue = 0
+        let group = CAAnimationGroup()
+        group.animations = [bounds, position, radius]
+        group.duration = duration
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self] in
+            guard let self, self.view.layer.mask === self.liftCropMask else { return }
+            self.view.layer.mask = nil
+        }
+        liftCropMask.add(group, forKey: "liftReset")
+        CATransaction.commit()
     }
     private var viewerObservation: ObservationToken?
     /// True while the Gallery toggle's cross-dissolve is in flight, to ignore repeat
@@ -195,12 +265,9 @@ final class BrowseNavController: UIViewController {
         bar.onCloseOtherTabs = { [weak self] in guard let self else { return }; tabsModel.closeOtherTabs(keeping: browseTab.id) }
         bar.onNextTab = { [weak self] in self?.tabsModel.selectNext() }
         bar.onPrevTab = { [weak self] in self?.tabsModel.selectPrevious() }
-        bar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
-        bar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
-        bar.onSwitcherLiftBegan = { [weak self] loc in self?.dragHandler?.switcherLiftBegan(at: loc) }
-        bar.onSwitcherLiftChanged = { [weak self] loc in self?.dragHandler?.switcherLiftChanged(at: loc) }
-        bar.onSwitcherLiftEnded = { [weak self] loc, v in self?.dragHandler?.switcherLiftEnded(at: loc, velocity: v) }
-        bar.onSwitcherLiftCancelled = { [weak self] in self?.dragHandler?.switcherLiftCancelled() }
+        bar.onDrag = { [weak self] loc, up, side in self?.dragHandler?.dragChanged(at: loc, up: up, side: side) }
+        bar.onDragRelease = { [weak self] loc, up, side, v in self?.dragHandler?.dragEnded(at: loc, up: up, side: side, velocity: v) }
+        bar.onDragCancel = { [weak self] in self?.dragHandler?.dragCancelled() }
         view.addSubview(bar)
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),

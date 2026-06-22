@@ -40,12 +40,19 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     private var switcherVC: TabSwitcherViewController?
     private var settingsVC: UIViewController?
 
-    // Lift-to-switcher: a full-screen snapshot of the active tab that the finger shifts up
-    // off the bar, then drops into its tab-grid slot on release.
+    // Lift-to-switcher: on commit, a snapshot of the active tab flies from its (shrunk)
+    // position on the carousel into its tab-grid slot. During the drag the live carousel
+    // itself shrinks — there's no separate preview overlay to flip on and off.
     private var flyingCard: UIView?
-    /// True during the interactive lift gesture (lift-off → release). Cleared synchronously
-    /// on release so a stray re-entrant lift event bails instead of grabbing the card.
-    private var liftActive = false
+    /// Upward travel (window points) at which a release commits to opening the switcher;
+    /// below it the carousel springs back. Matches the bar's own haptic threshold.
+    private let liftThreshold: CGFloat = 72
+    /// Slop the finger must rise before the carousel starts shrinking, so a level sideways
+    /// swipe scrubs tabs at full size without any vertical creep pulling it inward.
+    private let liftStartSlop: CGFloat = 8
+    /// Window points of upward travel, past ``liftThreshold``, over which the adjacent tabs
+    /// fade out — leaving just the lifted card as the drag commits to opening the switcher.
+    private let neighbourFadeBand: CGFloat = 50
     /// True while the close animation is running, so a repeat close (or a lift that slips
     /// through during it) can't kick off a second teardown.
     private var closingSwitcher = false
@@ -53,14 +60,16 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// an incidental observable read inside present/dismiss (e.g. a tab snapshot refreshed
     /// by the next lift) can't re-fire it and tear the switcher back down spuriously.
     private var lastSwitcherShown = false
-    /// Where the finger gripped the card as a fraction of the full-screen card (captured at
-    /// lift-off), so the card stays pinned under the finger as it shrinks and floats around.
-    private var liftGrip: CGPoint = .zero
-    /// The active tab's grid-slot frame (root-view space), captured at lift-off — where the
-    /// floating card drops on release.
+    /// The active tab's grid-slot frame (root-view space), captured at commit — where the
+    /// flying card drops as the switcher opens.
     private var liftTarget: CGRect = .zero
-    /// The floating card's scale once fully lifted, and the lift distance to reach it.
+    /// The shrunk carousel's scale at full lift.
     private let heldScale: CGFloat = 0.5
+    /// How far the finger rises to fully shrink the carousel into held cards.
+    private var liftFullRise: CGFloat { view.bounds.height * 0.32 }
+    /// How far the held card's centre rises at full lift — tuned so the finger keeps holding
+    /// the card near its bottom edge (where the bar was). Tweak by feel.
+    private var liftCenterRise: CGFloat { view.bounds.height * 0.12 }
 
     private var structureObservation: ObservationToken?
     private var switcherObservation: ObservationToken?
@@ -182,34 +191,136 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
     }
 
-    // MARK: - CarouselDragHandling
+    // MARK: - Drag (one continuous gesture: shrink + scrub, committed at release)
 
-    func carouselDragChanged(translation: CGFloat) {
-        // No carousel sliding while the switcher is present (including its drop/close
-        // flights) — a stray touch falling through must not move the pages behind it.
-        guard switcherVC == nil else { return }
-        if !isDragging {
-            isDragging = true
-            selectionHaptic.prepare()
-            // Snapshot the active tab (content only) while it's still full-screen, for its card.
-            tabs.activeTab.snapshot = controllers[tabs.activeTabID]?.contentSnapshot()
-            mountNeighbours()
+    // The bar reports the raw drag every frame; a single progress-driven transform shrinks the
+    // whole live carousel as the finger rises and slides it as the finger moves sideways — both
+    // at once. There are no separate "carousel" and "lift" modes to flip between: a level swipe
+    // scrubs tabs at full size, an upward swipe shrinks the current tab into a card with its
+    // neighbours peeking alongside, and any blend in between just works (like a partial swipe-up
+    // to the iOS app switcher). Releasing past the up-threshold opens the switcher; otherwise the
+    // carousel springs back and snaps to the nearest tab.
+
+    func dragChanged(at location: CGPoint, up: CGFloat, side: CGFloat) {
+        // Bail only once the switcher is committed-open.
+        guard !tabs.isShowingSwitcher, !closingSwitcher else { return }
+        startCarouselIfNeeded(at: location)
+        applyDrag(up: up, side: side)
+    }
+
+    func dragEnded(at location: CGPoint, up: CGFloat, side: CGFloat, velocity: CGPoint) {
+        guard !tabs.isShowingSwitcher, !closingSwitcher else { return }
+        // Decide by where the release was *heading* — project travel forward by the flick.
+        let projUp = up + max(0, -velocity.y) * 0.2
+        let projSide = side + velocity.x * 0.2
+        if projUp >= liftThreshold, projUp >= abs(projSide) {
+            commitLift(progress: liftProgress(forUp: up), velocity: velocity)   // open the switcher
+        } else {
+            snapCarousel(translation: side, velocity: velocity.x)              // un-shrink + switch / settle
         }
+    }
+
+    func dragCancelled() {
+        snapCarousel(translation: 0, velocity: 0)
+    }
+
+    private func startCarouselIfNeeded(at location: CGPoint) {
+        guard !isDragging else { return }
+        isDragging = true
+        selectionHaptic.prepare()
+        // Snapshot the active tab (content only, no bar) while it's full-screen — ready to fly
+        // into the grid if this drag commits to opening the switcher.
+        tabs.activeTab.snapshot = controllers[tabs.activeTabID]?.contentSnapshot()
+        mountNeighbours()
+    }
+
+    /// The one live transform: scrub sideways and shrink upward at the same time. `up` / `side`
+    /// are window-space travel from the touch-down point.
+    private func applyDrag(up: CGFloat, side: CGFloat) {
+        let progress = liftProgress(forUp: up)
+        let scale = 1 - (1 - heldScale) * progress
+        // Horizontal: finger-tracking, rubber-banded past the first / last tab (nothing there).
         let active = tabs.activeIndex
         let atStart = active == 0
         let atEnd = active == tabs.tabs.count - 1
-        // Rubber-band past the first/last tab — there's nothing there.
-        let offset = ((atStart && translation > 0) || (atEnd && translation < 0)) ? translation / 3 : translation
-        container.transform = CGAffineTransform(translationX: offset, y: 0)
+        let tx = ((atStart && side > 0) || (atEnd && side < 0)) ? side / 3 : side
+        // Vertical: lift the shrinking card up toward where the grid sits, keeping the finger
+        // near its bottom edge (where the bar was). Scaling around the container's centre means
+        // the neighbours, sitting a `slot` away, shrink with it and peek in alongside for free.
+        let ty = -progress * liftCenterRise
+        container.transform = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale)
+        revealLiftGrid(up: up)
+        applyLiftChrome(progress: progress, scale: scale, up: up)
     }
 
-    func carouselDragEnded(translation: CGFloat, velocity: CGFloat) {
-        guard switcherVC == nil, isDragging else { return }
+    /// Brings the switcher grid up *behind* the shrinking carousel and fades it in as the finger
+    /// rises — the picker comes into view through the gaps around the cards, then the neighbours
+    /// fading out past the threshold (see ``applyLiftChrome``) uncovers it entirely. Created once
+    /// per lift and reused; the commit promotes it, a settle tears it down.
+    private func revealLiftGrid(up: CGFloat) {
+        guard up > liftStartSlop else { return }
+        if switcherVC == nil {
+            let switcher = addSwitcherChild(behind: true)
+            switcher.view.isUserInteractionEnabled = false
+            switcher.view.layoutIfNeeded()
+            switcher.setCardHidden(true, forTab: tabs.activeTabID)   // active is the floating card
+            liftTarget = switcher.cardFrame(forTab: tabs.activeTabID, in: view)
+                ?? CGRect(x: view.bounds.midX - 77, y: 120, width: 154, height: 214)
+        }
+        // Fully in view by the open-threshold, so it's already there as the release commits.
+        switcherVC?.view.alpha = min(1, (up - liftStartSlop) / max(1, liftThreshold - liftStartSlop))
+    }
+
+    /// Fades out and removes the behind-the-carousel lift grid (used when a lift settles back to
+    /// the current tab). A no-op for a plain horizontal snap, where no grid was revealed.
+    private func tearDownLiftGrid(animated: Bool) {
+        guard let switcher = switcherVC else { return }
+        switcherVC = nil
+        let remove = {
+            switcher.willMove(toParent: nil)
+            switcher.view.removeFromSuperview()
+            switcher.removeFromParent()
+        }
+        guard animated, !UIAccessibility.isReduceMotionEnabled else { remove(); return }
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            switcher.view.alpha = 0
+        } completion: { _ in remove() }
+    }
+
+    /// Maps upward finger travel to lift progress (0 = full-screen tab, 1 = fully shrunk card).
+    private func liftProgress(forUp up: CGFloat) -> CGFloat {
+        min(max(0, up - liftStartSlop) / liftFullRise, 1)
+    }
+
+    /// Gives every mounted page its "card" look as the carousel shrinks — cropping each to the
+    /// switcher aspect and fading its bar — and fades the *adjacent* tabs out as the drag pushes
+    /// past the open threshold, so the lifted card is left alone at the commit point.
+    private func applyLiftChrome(progress: CGFloat, scale: CGFloat, up: CGFloat) {
+        let barAlpha = 1 - min(1, max(0, up) / (liftThreshold * 0.8))
+        let neighbourAlpha = 1 - min(1, max(0, up - liftThreshold) / neighbourFadeBand)
+        let activeID = tabs.activeTabID
+        for id in mountedIDs {
+            let nav = controllers[id]
+            nav?.setLiftProgress(progress, scale: scale, barAlpha: barAlpha)
+            nav?.view.alpha = id == activeID ? 1 : neighbourAlpha
+        }
+    }
+
+    /// Clears the card look from every mounted page at once (no animation), returning them to
+    /// plain full-screen tabs — used at commit, where the reset happens behind the opaque grid.
+    private func clearLiftChrome() {
+        for id in mountedIDs {
+            controllers[id]?.setLiftProgress(0, scale: 1, barAlpha: 1)
+            controllers[id]?.view.alpha = 1
+        }
+    }
+
+    private func snapCarousel(translation: CGFloat, velocity: CGFloat) {
+        guard isDragging else { return }
         let active = tabs.activeIndex
         let threshold = pageWidth * 0.22
-        // Project where a flick would coast to (~a fifth of a second of glide), so a
-        // quick flick changes tabs on little travel — like a paged scroll view — while
-        // a slow drag still needs to clear the distance threshold.
+        // Project where a flick would coast to (~a fifth of a second of glide), so a quick
+        // flick changes tabs on little travel while a slow drag must clear the distance.
         let projected = translation + velocity * 0.2
         var target = active
         if projected <= -threshold, active < tabs.tabs.count - 1 {
@@ -217,15 +328,24 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         } else if projected >= threshold, active > 0 {
             target = active - 1
         }
-
         let settled = -CGFloat(target - active) * slot
         if target != active { selectionHaptic.selectionChanged() }
-        // Carry the finger's speed into the spring so the snap continues the flick
-        // rather than restarting from a standstill.
+        // Carry the finger's speed into the spring so the snap continues the flick.
         let remaining = max(1, abs(settled - container.transform.tx))
         let initialV = min(abs(velocity) / remaining, 6)
+        // Open the crop masks back to full alongside the spring (sublayers a UIView animation
+        // block won't touch), then unwind the bar + neighbour fades inside the spring itself.
+        let dur: TimeInterval = UIAccessibility.isReduceMotionEnabled ? 0.2 : 0.35
+        for id in mountedIDs { controllers[id]?.animateLiftReset(duration: dur) }
+        tearDownLiftGrid(animated: true)   // fade the revealed picker away as the carousel grows back
         animateSnap(initialVelocity: initialV) {
+            // A plain translate (scale back to 1, no rise) un-shrinks the carousel and slides
+            // the chosen tab to centre in one spring.
             self.container.transform = CGAffineTransform(translationX: settled, y: 0)
+            for id in self.mountedIDs {
+                self.controllers[id]?.setBarAlpha(1)
+                self.controllers[id]?.view.alpha = 1
+            }
         } completion: {
             if target != active {
                 self.tabs.activeTabID = self.tabs.tabs[target].id
@@ -236,173 +356,57 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
     }
 
-    // MARK: - Lift-to-switcher (interactive)
+    // MARK: Commit (release past the up-threshold → open the switcher)
 
-    func switcherLiftBegan(at location: CGPoint) {
-        guard switcherVC == nil, !closingSwitcher else { return }
-        liftActive = true
-        flyingCard?.removeFromSuperview()   // defensive: never stack two cards
-        flyingCard = nil
-        let f = view.convert(location, from: nil)
+    /// Promotes the picker (already revealed behind the carousel) to the front, swaps the shrunk
+    /// live active tab for a snapshot card at its current (already switcher-shaped) frame, and
+    /// flies the card into its slot. The live carousel is reset beneath the now-opaque grid.
+    private func commitLift(progress: CGFloat, velocity: CGPoint) {
+        let activeID = tabs.activeTabID
+        // The active page's current on-screen card frame — shrunk, lifted, and cropped to the
+        // switcher aspect by the live drag, so the snapshot starts an exact match.
+        let startFrame = controllers[activeID]?.liftCardFrame(progress: progress, in: view)
+            ?? view.bounds
 
-        // If a horizontal carousel drag is in progress the active tab is shifted partway
-        // off-frame. The card should peel off from *there*, showing the clean current tab —
-        // not the half-swiped composite (offset tab + peeking neighbour + offset bar). So
-        // measure the grip and the card's start frame against that horizontal offset.
-        let offsetX = container.transform.tx
-        let startFrame = CGRect(x: offsetX, y: 0, width: view.bounds.width, height: view.bounds.height)
-        liftGrip = CGPoint(x: (f.x - offsetX) / max(1, view.bounds.width), y: f.y / max(1, view.bounds.height))
-
-        // Snapshot for the card: content only (no bar), so the bar is never baked in — it's
-        // captured separately as a "ghost" at its current lifted position and fades out on
-        // top as the content peels off. Both are taken before the carousel resets.
-        let nav = controllers[tabs.activeTabID]
-        if let content = nav?.contentSnapshot() { tabs.activeTab.snapshot = content }
-        let snapshot = tabs.activeTab.snapshot
-        let barGhost = nav?.barGhost(in: view)
-
-        // Capture any peeking neighbour (image + on-screen frame) before the carousel resets,
-        // so it can fade out over the revealed grid instead of vanishing instantly.
-        let neighbourFades: [(UIImage, CGRect)] = (isDragging && !UIAccessibility.isReduceMotionEnabled)
-            ? mountedIDs.filter { $0 != tabs.activeTabID }.compactMap { id in
-                guard let nav = controllers[id], let image = renderSnapshot(of: nav.view) else { return nil }
-                return (image, container.convert(nav.view.frame, to: view))
-            }
-            : []
-
-        // Park the carousel back on the active tab behind the (about-to-be-added) card.
-        container.transform = .identity
-        isDragging = false
-        rebuildActive()
-
-        // Reveal the switcher grid behind, with the active tab's slot empty (its snapshot
-        // is about to drop into it). The pan still owns the touch, so keep the grid inert.
+        // The grid is already revealed (behind the carousel) from the lift; promote it to the
+        // opaque, interactive switcher on top — the active slot kept empty for the card to drop
+        // into. (A very fast flick from rest can commit before the reveal ran — create it here.)
         let switcher = addSwitcherChild()
-        switcher.view.isUserInteractionEnabled = false
         switcher.view.layoutIfNeeded()
-        switcher.setCardHidden(true, forTab: tabs.activeTabID)
-
-        guard !UIAccessibility.isReduceMotionEnabled else {
-            // No flight under Reduce Motion: fade the grid in and let release finalize.
-            switcher.setCardHidden(false, forTab: tabs.activeTabID)
-            switcher.view.alpha = 0
-            UIView.animate(withDuration: 0.2) { switcher.view.alpha = 1 }
-            return
-        }
-
-        // Fade the captured neighbour(s) out over the revealed grid (above the switcher).
-        for (image, frame) in neighbourFades {
-            let ghost = UIImageView(image: image)
-            ghost.frame = frame
-            ghost.isUserInteractionEnabled = false
-            ghost.clipsToBounds = true
-            view.addSubview(ghost)
-            UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
-                ghost.alpha = 0
-            } completion: { _ in ghost.removeFromSuperview() }
-        }
-
-        // The card starts exactly where the tab is — full-size, at its current horizontal
-        // offset — so nothing pops. From here it floats under the finger; release drops it
-        // into its slot.
-        liftTarget = switcher.cardFrame(forTab: tabs.activeTabID, in: view)
+        switcher.setCardHidden(true, forTab: activeID)
+        liftTarget = switcher.cardFrame(forTab: activeID, in: view)
             ?? CGRect(x: view.bounds.midX - 77, y: 120, width: 154, height: 214)
-        let card = makeFlyingCard(image: snapshot, frame: startFrame)
+        view.bringSubviewToFront(switcher.view)
+        switcher.view.alpha = 1
+        switcher.view.isUserInteractionEnabled = true
+
+        // The snapshot card stands in for the live tab, starting exactly where it sits now: same
+        // switcher aspect (so the flight is a pure size/position settle) and bar already faded
+        // out, so the swap to the bar-less snapshot is seamless.
+        let card = makeFlyingCard(image: tabs.activeTab.snapshot, frame: startFrame)
         view.addSubview(card)
         flyingCard = card
 
-        // The bar peels off as a ghost on top of the card and dissolves in place; the live
-        // bar (reset behind the card) fades back in when the tab is reopened.
-        if let (image, frame) = barGhost {
-            let barView = UIImageView(image: image)
-            barView.frame = frame
-            barView.isUserInteractionEnabled = false
-            view.addSubview(barView)
-            UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
-                barView.alpha = 0
-            } completion: { _ in barView.removeFromSuperview() }
-        }
-    }
-
-    func switcherLiftChanged(at location: CGPoint) {
-        // Float the card under the finger with a light spring, so a quick swipe bounces the
-        // distance up to its held position instead of snapping straight there; a steady drag
-        // still follows closely. (Size still tracks height via the target frame.)
-        guard let card = flyingCard else { return }
-        let target = heldFrame(under: view.convert(location, from: nil))
-        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0,
-                       options: [.beginFromCurrentState, .allowUserInteraction]) {
-            card.frame = target
-        }
-    }
-
-    func switcherLiftEnded(at location: CGPoint, velocity: CGPoint) {
-        guard liftActive, let switcher = switcherVC else { return }
-        // Claim the gesture synchronously: clear the live state and detach the card *now* so
-        // any re-entrant lift/change event bails rather than grabbing the in-flight card.
-        liftActive = false
-        let card = flyingCard
-        flyingCard = nil
-        // Reflect the open state immediately (observer re-present is a no-op — child exists).
+        // Commit the open and tear the live carousel down beneath the (opaque) grid.
         tabs.isShowingSwitcher = true
+        isDragging = false
+        clearLiftChrome()
+        container.transform = .identity
+        rebuildActive()
 
         let reveal = {
-            switcher.setCardHidden(false, forTab: self.tabs.activeTabID)
+            switcher.setCardHidden(false, forTab: activeID)
             switcher.view.isUserInteractionEnabled = true
         }
-        guard let card else { reveal(); return }   // Reduce Motion (no flying card)
-        // Letting go drops it into its slot, carrying the finger's release speed.
+        guard !UIAccessibility.isReduceMotionEnabled else {
+            card.removeFromSuperview(); flyingCard = nil; reveal(); return
+        }
+        // Letting go drops the card into its slot, carrying the finger's release speed.
         flyCard(card, to: liftTarget, settlingBorderWidth: 3, velocity: velocity) {
             card.removeFromSuperview()
+            self.flyingCard = nil
             reveal()
         }
-    }
-
-    /// The lift was released below the threshold — keep the current tab open. Settle the
-    /// card back to full-screen over the (still-opaque) grid, then drop both, revealing the
-    /// unchanged live tab. `isShowingSwitcher` never flipped, so the switcher is torn down
-    /// directly here (mirrors `dismissSwitcher`'s guards so a re-entrant gesture can't race).
-    func switcherLiftCancelled() {
-        guard liftActive, let switcher = switcherVC, !closingSwitcher else { return }
-        liftActive = false
-        closingSwitcher = true
-        let card = flyingCard
-        flyingCard = nil
-
-        let tearDown = {
-            self.closingSwitcher = false
-            self.switcherVC = nil
-            switcher.willMove(toParent: nil)
-            switcher.view.removeFromSuperview()
-            switcher.removeFromParent()
-        }
-        guard let card, !UIAccessibility.isReduceMotionEnabled else {
-            card?.removeFromSuperview()
-            tearDown()
-            return
-        }
-        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.2,
-                       options: [.allowUserInteraction]) {
-            card.frame = self.view.bounds
-        } completion: { _ in
-            card.removeFromSuperview()
-            tearDown()
-        }
-    }
-
-    /// The floating card's frame for a finger at `point` (root-view space): sized by how far
-    /// it's currently lifted (full-screen → `heldScale`, tracking height both ways) and
-    /// positioned so the original grip point stays under the finger.
-    private func heldFrame(under point: CGPoint) -> CGRect {
-        let bounds = view.bounds
-        let risen = max(0, liftGrip.y * bounds.height - point.y)
-        // Size tracks height directly (no latch): pull up to shrink, bring back down to
-        // grow again — full-screen at/below the lift-off point.
-        let progress = min(risen / (bounds.height * 0.32), 1)
-        let scale = 1 - (1 - heldScale) * progress
-        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        let origin = CGPoint(x: point.x - liftGrip.x * size.width, y: point.y - liftGrip.y * size.height)
-        return CGRect(origin: origin, size: size)
     }
 
     /// A snapshot card styled to match a switcher cell's body, so it lands seamlessly.
@@ -425,9 +429,6 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         return card
     }
 
-    /// Renders a view's current content to an image (used to fade a peeking neighbour out
-    /// after the carousel resets it away).
-    private func renderSnapshot(of v: UIView) -> UIImage? { WindowSnapshot.render(v) }
 
     /// Springs the flying card to `target`, fading the active-cell selection ring in as it
     /// lands, then calls `completion`. Carries the release velocity into the spring.
@@ -484,8 +485,11 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
     }
 
+    /// Adds the switcher grid as a child. `behind` slots it *under* the carousel so the lift's
+    /// shrinking cards float above the revealed picker (the live reveal); otherwise it goes on
+    /// top (pill-tap / VoiceOver open, and the commit promotion).
     @discardableResult
-    private func addSwitcherChild() -> TabSwitcherViewController {
+    private func addSwitcherChild(behind: Bool = false) -> TabSwitcherViewController {
         if let existing = switcherVC { return existing }
         let switcher = TabSwitcherViewController(tabs: tabs)
         switcherVC = switcher
@@ -495,7 +499,8 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         // As a child (not a fullScreen modal) the covered carousel + bar would still be in
         // the accessibility tree — mark the switcher modal so VoiceOver ignores them.
         switcher.view.accessibilityViewIsModal = true
-        view.addSubview(switcher.view)
+        if behind { view.insertSubview(switcher.view, belowSubview: container) }
+        else { view.addSubview(switcher.view) }
         switcher.didMove(toParent: self)
         return switcher
     }
@@ -524,7 +529,6 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     private func dismissSwitcher() {
         guard let switcher = switcherVC, !closingSwitcher else { return }
         closingSwitcher = true
-        liftActive = false
         rebuildActive()   // make sure the live tab is mounted behind before the reveal
         flyingCard?.removeFromSuperview()   // drop any leftover lift card; the close grows its own
         flyingCard = nil
