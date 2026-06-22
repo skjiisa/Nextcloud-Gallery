@@ -49,7 +49,13 @@ final class BrowseNavController: UIViewController {
 
     private let bar = GlassTabBar()
     private var barObservation: ObservationToken?
+    private var viewerObservation: ObservationToken?
     private var photoViewer: PhotoViewerController?
+    /// True while the Gallery toggle's cross-dissolve is in flight, to ignore repeat
+    /// taps until it settles.
+    private var isSwappingPresentation = false
+
+    // MARK: - Switcher lift support
 
     /// Whichever bar is currently on screen for this tab — the viewer's while a photo is
     /// open, otherwise the browse bar.
@@ -62,13 +68,6 @@ final class BrowseNavController: UIViewController {
     func contentSnapshot() -> UIImage? {
         if let viewer = photoViewer { return viewer.contentSnapshot() }
         return WindowSnapshot.render(navController.view)
-    }
-
-    /// A snapshot of the bar plus its on-screen frame in `space`, used for the fade-out
-    /// "ghost" overlaid at lift-off (so the bar dissolves in place rather than vanishing).
-    func barGhost(in space: UICoordinateSpace) -> (image: UIImage, frame: CGRect)? {
-        guard let image = WindowSnapshot.render(activeBar) else { return nil }
-        return (image, activeBar.convert(activeBar.bounds, to: space))
     }
 
     /// Fades the bar in from hidden (at rest) — used when reopening a tab so the bar appears
@@ -159,10 +158,6 @@ final class BrowseNavController: UIViewController {
         liftCropMask.add(group, forKey: "liftReset")
         CATransaction.commit()
     }
-    private var viewerObservation: ObservationToken?
-    /// True while the Gallery toggle's cross-dissolve is in flight, to ignore repeat
-    /// taps until it settles.
-    private var isSwappingPresentation = false
 
     init(tab: BrowseTab, environment: AppEnvironment, client: NextcloudClient, tabsModel: TabsModel, dragHandler: CarouselDragHandling?) {
         self.browseTab = tab

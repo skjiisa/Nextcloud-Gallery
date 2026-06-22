@@ -449,7 +449,6 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         return card
     }
 
-
     /// Springs the flying card to `target`, fading the active-cell selection ring in as it
     /// lands, then calls `completion`. Carries the release velocity into the spring.
     private func flyCard(_ card: UIView, to target: CGRect, settlingBorderWidth: CGFloat, velocity: CGPoint, completion: @escaping () -> Void) {
