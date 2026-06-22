@@ -65,11 +65,13 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     private var liftTarget: CGRect = .zero
     /// The shrunk carousel's scale at full lift.
     private let heldScale: CGFloat = 0.5
-    /// How far the finger rises to fully shrink the carousel into held cards.
-    private var liftFullRise: CGFloat { view.bounds.height * 0.32 }
-    /// How far the held card's centre rises at full lift — tuned so the finger keeps holding
-    /// the card near its bottom edge (where the bar was). Tweak by feel.
-    private var liftCenterRise: CGFloat { view.bounds.height * 0.12 }
+    /// How far the finger rises to fully shrink the carousel into held cards — lower = reaches
+    /// the smallest size on less travel.
+    private var liftFullRise: CGFloat { view.bounds.height * 0.3 }
+    /// Where the finger first gripped, as a fraction of the page (captured at touch-down). The
+    /// lift keeps the finger at this same fraction down the shrinking card, so the card stays
+    /// pinned under the fingertip and can be dragged anywhere on screen.
+    private var liftGrip: CGPoint = .zero
 
     private var structureObservation: ObservationToken?
     private var switcherObservation: ObservationToken?
@@ -205,7 +207,7 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         // Bail only once the switcher is committed-open.
         guard !tabs.isShowingSwitcher, !closingSwitcher else { return }
         startCarouselIfNeeded(at: location)
-        applyDrag(up: up, side: side)
+        applyDrag(up: up, side: side, at: location)
     }
 
     func dragEnded(at location: CGPoint, up: CGFloat, side: CGFloat, velocity: CGPoint) {
@@ -228,26 +230,44 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         guard !isDragging else { return }
         isDragging = true
         selectionHaptic.prepare()
+        // Where the finger gripped, as a fraction of the page — the lift holds it there as the
+        // card shrinks so the card stays under the fingertip.
+        let f = view.convert(location, from: nil)
+        liftGrip = CGPoint(x: f.x / max(1, view.bounds.width), y: f.y / max(1, view.bounds.height))
         // Snapshot the active tab (content only, no bar) while it's full-screen — ready to fly
         // into the grid if this drag commits to opening the switcher.
         tabs.activeTab.snapshot = controllers[tabs.activeTabID]?.contentSnapshot()
         mountNeighbours()
     }
 
-    /// The one live transform: scrub sideways and shrink upward at the same time. `up` / `side`
-    /// are window-space travel from the touch-down point.
-    private func applyDrag(up: CGFloat, side: CGFloat) {
+    /// The one live transform: scrub sideways and shrink upward at the same time, with the card
+    /// pinned under the fingertip so it can be dragged anywhere on screen. `up` / `side` are
+    /// window-space travel from the touch-down point; `location` is the live finger position.
+    private func applyDrag(up: CGFloat, side: CGFloat, at location: CGPoint) {
         let progress = liftProgress(forUp: up)
         let scale = 1 - (1 - heldScale) * progress
-        // Horizontal: finger-tracking, rubber-banded past the first / last tab (nothing there).
+        // Horizontal: finger-tracking. Rubber-band the over-scroll past the first / last tab
+        // while flat — there's no tab to scrub to — but release that resistance as the tab lifts
+        // into a card: by then it's being dragged around freely, not scrubbed, so it should track
+        // the finger 1:1. Fully free once it's clearly lifted, well before minimum size.
         let active = tabs.activeIndex
         let atStart = active == 0
         let atEnd = active == tabs.tabs.count - 1
-        let tx = ((atStart && side > 0) || (atEnd && side < 0)) ? side / 3 : side
-        // Vertical: lift the shrinking card up toward where the grid sits, keeping the finger
-        // near its bottom edge (where the bar was). Scaling around the container's centre means
-        // the neighbours, sitting a `slot` away, shrink with it and peek in alongside for free.
-        let ty = -progress * liftCenterRise
+        let overscroll = (atStart && side > 0) || (atEnd && side < 0)
+        let resistance: CGFloat = overscroll ? min(1, 1.0 / 3.0 + progress) : 1
+        let tx = side * resistance
+        // Vertical: pin the card under the finger. The bar (what you grabbed) is cropped away as
+        // the tab becomes a card, so rather than chase that lost point we hold the finger at the
+        // same fraction down the *cropped* card it gripped at — the card sits under the fingertip
+        // and keeps following it anywhere, even once fully shrunk. Only while genuinely lifted;
+        // dragging back down to/below the start just un-shrinks in place (no downward slide).
+        let bounds = view.bounds
+        var ty: CGFloat = 0
+        if up > 0 {
+            let f = view.convert(location, from: nil)
+            let pageCardHeight = bounds.height - (bounds.height - bounds.width / TabCardCell.cardAspect) * progress
+            ty = (f.y - (liftGrip.y - 0.5) * scale * pageCardHeight) - bounds.height / 2
+        }
         container.transform = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale)
         revealLiftGrid(up: up)
         applyLiftChrome(progress: progress, scale: scale, up: up)
