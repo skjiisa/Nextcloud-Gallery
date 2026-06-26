@@ -72,6 +72,17 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// lift keeps the finger at this same fraction down the shrinking card, so the card stays
     /// pinned under the fingertip and can be dragged anywhere on screen.
     private var liftGrip: CGPoint = .zero
+    /// True once a fast flick has switched the live transform from 1:1 tracking to springing
+    /// toward the finger; stays set for the rest of the gesture so the bounce isn't cut short.
+    private var liftSpringing = false
+    /// Finger upward speed (pts/sec) above which an up-swipe counts as a fast flick that should
+    /// spring to the swipe position rather than track 1:1. Measured from `up` over wall-clock
+    /// time, so it's frame-rate independent — a per-frame pixel delta is ~2× larger at 120Hz than
+    /// 60Hz, which made the old detector silently not fire on ProMotion devices.
+    private let liftFlickVelocity: CGFloat = 1000
+    private var lastUp: CGFloat = 0
+    private var lastUpTime: CFTimeInterval = 0
+    private var upTrackingStarted = false
 
     private var structureObservation: ObservationToken?
     private var switcherObservation: ObservationToken?
@@ -220,15 +231,23 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         } else {
             snapCarousel(translation: side, velocity: velocity.x)              // un-shrink + switch / settle
         }
+        // Clear the flick state synchronously so a quick re-grab during the snap's settle (which
+        // only clears isDragging in its completion) doesn't inherit a stale armed spring.
+        liftSpringing = false
+        upTrackingStarted = false
     }
 
     func dragCancelled() {
         snapCarousel(translation: 0, velocity: 0)
+        liftSpringing = false
+        upTrackingStarted = false
     }
 
     private func startCarouselIfNeeded(at location: CGPoint) {
         guard !isDragging else { return }
         isDragging = true
+        liftSpringing = false
+        upTrackingStarted = false
         selectionHaptic.prepare()
         // Where the finger gripped, as a fraction of the page — the lift holds it there as the
         // card shrinks so the card stays under the fingertip.
@@ -244,6 +263,19 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// pinned under the fingertip so it can be dragged anywhere on screen. `up` / `side` are
     /// window-space travel from the touch-down point; `location` is the live finger position.
     private func applyDrag(up: CGFloat, side: CGFloat, at location: CGPoint) {
+        // Arm the spring on a fast UPWARD flick (frame-rate-independent speed, lift axis only, so
+        // a fast sideways scrub never trips it). Once armed it stays armed for the gesture.
+        let now = CACurrentMediaTime()
+        if upTrackingStarted, !liftSpringing, !UIAccessibility.isReduceMotionEnabled {
+            let dt = now - lastUpTime
+            if dt > 0, (up - lastUp) / CGFloat(dt) > liftFlickVelocity, up > liftStartSlop {
+                liftSpringing = true
+            }
+        }
+        lastUp = up
+        lastUpTime = now
+        upTrackingStarted = true
+
         let progress = liftProgress(forUp: up)
         let scale = 1 - (1 - heldScale) * progress
         // Horizontal: finger-tracking. Rubber-band the over-scroll past the first / last tab
@@ -268,9 +300,24 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
             let pageCardHeight = bounds.height - (bounds.height - bounds.width / TabCardCell.cardAspect) * progress
             ty = (f.y - (liftGrip.y - 0.5) * scale * pageCardHeight) - bounds.height / 2
         }
-        container.transform = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale)
+        setContainerTransform(CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale))
         revealLiftGrid(up: up)
         applyLiftChrome(progress: progress, scale: scale, up: up)
+    }
+
+    /// Applies the live drag transform. A steady drag tracks the finger 1:1 (set directly); once a
+    /// fast up-flick has armed `liftSpringing` (see `applyDrag`), the transform springs toward the
+    /// finger so the tab *bounces* to the swipe position instead of snapping. It stays armed for
+    /// the rest of the gesture so a follow-up direct set can't cut the bounce off.
+    private func setContainerTransform(_ target: CGAffineTransform) {
+        guard liftSpringing, !UIAccessibility.isReduceMotionEnabled else {
+            container.transform = target
+            return
+        }
+        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0,
+                       options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.container.transform = target
+        }
     }
 
     /// Brings the switcher grid up *behind* the shrinking carousel and fades it in as the finger
@@ -383,6 +430,14 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// flies the card into its slot. The live carousel is reset beneath the now-opaque grid.
     private func commitLift(progress: CGFloat, velocity: CGPoint) {
         let activeID = tabs.activeTabID
+        // If a fast flick is still springing the carousel, freeze it at its current on-screen
+        // position first, so the snapshot card starts exactly where the tab visually is rather
+        // than where the spring was heading (otherwise the hand-off jumps).
+        if liftSpringing {
+            let presented = container.layer.presentation()?.affineTransform() ?? container.transform
+            container.layer.removeAllAnimations()
+            container.transform = presented
+        }
         // The active page's current on-screen card frame — shrunk, lifted, and cropped to the
         // switcher aspect by the live drag, so the snapshot starts an exact match.
         let startFrame = controllers[activeID]?.liftCardFrame(progress: progress, in: view)
@@ -471,11 +526,11 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// linear settle instead of a spring with overshoot).
     private func animateSnap(initialVelocity: CGFloat, _ animations: @escaping () -> Void, completion: @escaping () -> Void) {
         if UIAccessibility.isReduceMotionEnabled {
-            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]) {
                 animations()
             } completion: { _ in completion() }
         } else {
-            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: initialVelocity, options: [.curveEaseOut, .allowUserInteraction]) {
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: initialVelocity, options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]) {
                 animations()
             } completion: { _ in completion() }
         }
