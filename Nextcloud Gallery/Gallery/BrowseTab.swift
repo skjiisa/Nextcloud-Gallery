@@ -41,6 +41,10 @@ final class BrowseTab: Identifiable {
     var zoom: GalleryGridZoom
     var aspectFill: Bool
 
+    /// The flattened gallery's active content filters (favorites / zoom-locked).
+    /// Combinable, and remembered per tab like the other appearance state.
+    var filter: GalleryFilter
+
     /// The full-screen photo currently open in this tab, if any. In-memory only —
     /// a cold launch restores the browse stack but not an open viewer.
     var viewer: ViewerPresentation?
@@ -64,13 +68,15 @@ final class BrowseTab: Identifiable {
         path: [BrowseRoute] = [],
         sort: GallerySortOrder = .newestFirst,
         zoom: GalleryGridZoom = .medium,
-        aspectFill: Bool = true
+        aspectFill: Bool = true,
+        filter: GalleryFilter = []
     ) {
         self.id = id
         self.path = path
         self.sort = sort
         self.zoom = zoom
         self.aspectFill = aspectFill
+        self.filter = filter
     }
 
     /// The tab's label (bar pill + switcher card): the open photo's name when a photo
@@ -98,10 +104,13 @@ extension BrowseTab {
         var sort: GallerySortOrder
         var zoom: GalleryGridZoom
         var aspectFill: Bool
+        // Optional so tabs persisted before filters existed still decode (a missing
+        // key becomes nil → no active filter).
+        var filter: GalleryFilter?
     }
 
     var persisted: Persisted {
-        Persisted(id: id, path: path, sort: sort, zoom: zoom, aspectFill: aspectFill)
+        Persisted(id: id, path: path, sort: sort, zoom: zoom, aspectFill: aspectFill, filter: filter)
     }
 
     convenience init(persisted: Persisted) {
@@ -110,7 +119,8 @@ extension BrowseTab {
             path: persisted.path,
             sort: persisted.sort,
             zoom: persisted.zoom,
-            aspectFill: persisted.aspectFill
+            aspectFill: persisted.aspectFill,
+            filter: persisted.filter ?? []
         )
     }
 }
