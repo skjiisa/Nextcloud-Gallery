@@ -131,6 +131,19 @@ final class ZoomableImageScrollView: UIScrollView, UIScrollViewDelegate {
         panGestureRecognizer.isEnabled = isZoomedIn
     }
 
+    /// Authoritatively refuses the scroll view's own pan at the rest scale, so a drag
+    /// there falls through to the pager (swipe between photos) and the viewer's
+    /// swipe-to-dismiss. This is the reliable gate: unlike `panGestureRecognizer.isEnabled`
+    /// (which UIScrollView re-enables on its own — e.g. when a locked photo's image loads
+    /// in after `seatToBaseline`, leaving the inner pan live and stealing horizontal
+    /// swipes), `gestureRecognizerShouldBegin` is consulted every time the pan tries to
+    /// start. A locked photo is "at rest" at its baseline scale, where `isZoomedIn` is
+    /// false, so it pages between photos like a fit-scale one.
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === panGestureRecognizer, !isZoomedIn { return false }
+        return super.gestureRecognizerShouldBegin(gestureRecognizer)
+    }
+
     private func reportZoomState() {
         let zoomed = isZoomedIn
         guard zoomed != lastZoomedReported else { return }
