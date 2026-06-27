@@ -49,6 +49,22 @@ extension NextcloudClient {
         }
     }
 
+    /// The ocIds of the account's favorited photos, for filtering a gallery against
+    /// its favorites. Unlike ``favorites``, this skips folders and the per-folder cover
+    /// fetch — the filter only needs to know which photos are favorited, so it stays a
+    /// single lightweight REPORT.
+    func favoriteImageOcIds() async throws -> Set<String> {
+        let result = await NextcloudKit.shared.listingFavoritesAsync(
+            showHiddenFiles: false,
+            account: credentials.account,
+            options: NKRequestOptions(queue: .main)
+        )
+        guard result.error == .success else { throw GalleryError(result.error) }
+        return Set((result.files ?? [])
+            .filter { !$0.directory && $0.classFile == NKTypeClassFile.image.rawValue }
+            .map(\.ocId))
+    }
+
     /// Marks the file at `serverPath` (a full Files-DAV URL) as a favorite or not.
     /// NextcloudKit wants a path relative to the user's Files root, so the root prefix
     /// is stripped here.

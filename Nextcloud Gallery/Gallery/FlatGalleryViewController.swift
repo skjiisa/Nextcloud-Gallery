@@ -24,6 +24,10 @@ final class FlatGalleryViewController: UIViewController {
     private let statusView = GridStatusView()
     private let refreshControl = UIRefreshControl()
 
+    /// Every photo under the subtree, straight from the cache. `items` is this set
+    /// after the active ``GalleryFilter`` is applied — it's what the grid, viewer,
+    /// and transition source all see.
+    private var allItems: [GridItemSnapshot] = []
     private var items: [GridItemSnapshot] = []
     private var isLoading = false
     private var errorMessage: String?
@@ -32,14 +36,22 @@ final class FlatGalleryViewController: UIViewController {
     private var lockObserver: NSObjectProtocol?
     private var tabObservation: ObservationToken?
 
-    // Last-applied appearance, to tell apart "sort changed → refetch" from
-    // "zoom/aspect changed → just relayout/reconfigure".
+    // The account's favorited ocIds, fetched lazily the first time the favorites
+    // filter is on (favorites aren't cached locally). `nil` means "not loaded yet".
+    private var favoriteOcIds: Set<String>?
+    private var isLoadingFavorites = false
+    private var favoritesError: String?
+
+    // Last-applied appearance, to tell apart "sort/filter changed → refetch/refilter"
+    // from "zoom/aspect changed → just relayout/reconfigure".
     private var appliedSort: GallerySortOrder
     private var appliedZoom: GalleryGridZoom
     private var appliedAspectFill: Bool
+    private var appliedFilter: GalleryFilter
 
     private var sortItem: UIBarButtonItem!
     private var aspectItem: UIBarButtonItem!
+    private var filterItem: UIBarButtonItem!
 
     /// Tight, Photos-style inter-tile gap and outer margin.
     private let tileSpacing: CGFloat = 2
@@ -58,6 +70,7 @@ final class FlatGalleryViewController: UIViewController {
         self.appliedSort = browseTab.sort
         self.appliedZoom = browseTab.zoom
         self.appliedAspectFill = browseTab.aspectFill
+        self.appliedFilter = browseTab.filter
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -148,7 +161,8 @@ final class FlatGalleryViewController: UIViewController {
         // keeps the flat-gallery-only controls: sort + fit/fill.
         aspectItem = UIBarButtonItem(image: nil, style: .plain, target: self, action: #selector(toggleAspect))
         sortItem = UIBarButtonItem(image: UIImage(systemName: "arrow.up.arrow.down"), menu: makeSortMenu())
-        navigationItem.rightBarButtonItems = [aspectItem, sortItem]
+        filterItem = UIBarButtonItem(image: nil, menu: makeFilterMenu())
+        navigationItem.rightBarButtonItems = [filterItem, aspectItem, sortItem]
         updateToolbar()
     }
 
@@ -161,8 +175,29 @@ final class FlatGalleryViewController: UIViewController {
         return UIMenu(title: "Sort", children: actions)
     }
 
+    /// A toggle per available filter. Multi-select (the menu reopens to flip the
+    /// other), matching the AND semantics — an item must satisfy every one that's on.
+    private func makeFilterMenu() -> UIMenu {
+        let actions = GalleryFilter.options.map { option in
+            UIAction(title: option.label, image: UIImage(systemName: option.symbol), state: browseTab.filter.contains(option.filter) ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                if browseTab.filter.contains(option.filter) {
+                    browseTab.filter.remove(option.filter)
+                } else {
+                    browseTab.filter.insert(option.filter)
+                }
+            }
+        }
+        return UIMenu(title: "Filter", children: actions)
+    }
+
     private func updateToolbar() {
         sortItem.menu = makeSortMenu()
+        filterItem.menu = makeFilterMenu()
+        // Fill the funnel when any filter is on, so the active state reads at a glance;
+        // a plain (circle-free) funnel when off.
+        let filtering = !browseTab.filter.isEmpty
+        filterItem.image = UIImage(systemName: filtering ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
         aspectItem.image = UIImage(systemName: browseTab.aspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
     }
 
@@ -172,19 +207,29 @@ final class FlatGalleryViewController: UIViewController {
         tabObservation = observeChanges { [weak self] in
             guard let self else { return }
             // Touch the observed properties so changes re-fire this closure.
-            let sort = self.browseTab.sort, zoom = self.browseTab.zoom, aspectFill = self.browseTab.aspectFill
-            self.apply(sort: sort, zoom: zoom, aspectFill: aspectFill)
+            let sort = self.browseTab.sort, zoom = self.browseTab.zoom
+            let aspectFill = self.browseTab.aspectFill, filter = self.browseTab.filter
+            self.apply(sort: sort, zoom: zoom, aspectFill: aspectFill, filter: filter)
         }
     }
 
-    private func apply(sort: GallerySortOrder, zoom: GalleryGridZoom, aspectFill: Bool) {
+    private func apply(sort: GallerySortOrder, zoom: GalleryGridZoom, aspectFill: Bool, filter: GalleryFilter) {
         let sortChanged = sort != appliedSort
         let zoomChanged = zoom != appliedZoom
         let aspectChanged = aspectFill != appliedAspectFill
-        appliedSort = sort; appliedZoom = zoom; appliedAspectFill = aspectFill
+        let filterChanged = filter != appliedFilter
+        // Favorites are toggled in the viewer (a sibling overlay that doesn't refresh
+        // this screen), so a cached favorites set goes stale. Re-fetch it whenever the
+        // favorites filter is switched on, so a just-favorited photo shows up.
+        let favoritesTurnedOn = filter.contains(.favorites) && !appliedFilter.contains(.favorites)
+        appliedSort = sort; appliedZoom = zoom; appliedAspectFill = aspectFill; appliedFilter = filter
 
         updateToolbar()
+        // A sort change refetches (and re-filters at the end); a filter-only change
+        // just re-filters the items already in hand.
         if sortChanged { reloadFromCache() }
+        else if filterChanged { applyFilter() }
+        if favoritesTurnedOn { loadFavoritesIfNeeded(force: true) }
         guard zoomChanged || aspectChanged else { return }
 
         // One bouncy spring drives the whole change: the column/size change (zoom)
@@ -236,9 +281,55 @@ final class FlatGalleryViewController: UIViewController {
         let sort = appliedSort
         Task {
             let snapshots = (try? await cacheStore.flatItems(under: folderPath, account: account, sort: sort)) ?? []
-            self.items = snapshots
-            applySnapshot()
-            updateStatus()
+            self.allItems = snapshots
+            applyFilter()
+        }
+    }
+
+    /// Narrows ``allItems`` to the active filters and pushes the result to the grid.
+    /// Zoom-locked is a synchronous lookup in the local store; favorites needs the
+    /// account's favorited ids, fetched lazily (see ``loadFavoritesIfNeeded``) — until
+    /// they arrive the favorites-filtered result is empty and a spinner shows.
+    private func applyFilter() {
+        var result = allItems
+        if appliedFilter.contains(.zoomLocked) {
+            let store = environment.zoomLockStore
+            result = result.filter { store.isLocked($0.ocId) }
+        }
+        if appliedFilter.contains(.favorites) {
+            if let favoriteOcIds {
+                result = result.filter { favoriteOcIds.contains($0.ocId) }
+            } else {
+                result = []
+                loadFavoritesIfNeeded()
+            }
+        }
+        items = result
+        applySnapshot()
+        updateStatus()
+    }
+
+    /// Fetches the account's favorited ids, then re-applies the filter. Favorites live
+    /// on the server (not the cache), so the set is cached for the screen's lifetime and
+    /// only re-read when needed: `force` re-fetches an already-loaded set (favorites
+    /// changed in the viewer, or the filter was just switched on), keeping the current
+    /// results visible while it refreshes; ``load`` (pull-to-refresh) clears it outright.
+    private func loadFavoritesIfNeeded(force: Bool = false) {
+        guard !isLoadingFavorites else { return }
+        if !force, favoriteOcIds != nil { return }
+        isLoadingFavorites = true
+        favoritesError = nil
+        updateStatus()
+        Task {
+            defer { isLoadingFavorites = false }
+            do {
+                favoriteOcIds = try await client.favoriteImageOcIds()
+            } catch is CancellationError {
+                return
+            } catch {
+                favoritesError = (error as? GalleryError)?.userMessage ?? error.localizedDescription
+            }
+            applyFilter()
         }
     }
 
@@ -250,20 +341,42 @@ final class FlatGalleryViewController: UIViewController {
     }
 
     private func updateStatus() {
-        if isLoading && items.isEmpty {
+        guard items.isEmpty else { statusView.hide(); return }
+        // The favorites set is still resolving — we can't yet say "no favorites".
+        if appliedFilter.contains(.favorites), favoriteOcIds == nil, favoritesError == nil {
             statusView.showLoading()
-        } else if let errorMessage, items.isEmpty {
+        } else if let favoritesError {
+            statusView.showError(symbol: "exclamationmark.triangle", title: "Couldn't load favorites", message: favoritesError)
+        } else if allItems.isEmpty, isLoading {
+            // Genuine first load: nothing cached yet and the recursive search is running.
+            statusView.showLoading()
+        } else if let errorMessage, allItems.isEmpty {
             statusView.showError(symbol: "exclamationmark.triangle", title: "Couldn't load", message: errorMessage)
-        } else if items.isEmpty {
-            statusView.showEmpty(symbol: "photo.on.rectangle", title: "No Photos", message: "This folder has no photos.")
         } else {
-            statusView.hide()
+            // The cache is populated but the active filter excluded everything. Show the
+            // filter's empty state rather than waiting on the background search — if it
+            // later turns up a match, the cache observer re-applies the filter.
+            let empty = filterEmptyState
+            statusView.showEmpty(symbol: empty.symbol, title: empty.title, message: empty.message)
+        }
+    }
+
+    /// The empty-state copy, tailored to which filters are on so a filtered-out
+    /// gallery doesn't read as a genuinely empty folder.
+    private var filterEmptyState: (symbol: String, title: String, message: String) {
+        switch (appliedFilter.contains(.favorites), appliedFilter.contains(.zoomLocked)) {
+        case (true, true): ("line.3.horizontal.decrease.circle", "No Matches", "No favorited, zoom-locked photos here.")
+        case (true, false): ("heart", "No Favorites", "No favorited photos here.")
+        case (false, true): ("lock", "No Locked Photos", "No zoom-locked photos here.")
+        case (false, false): ("photo.on.rectangle", "No Photos", "This folder has no photos.")
         }
     }
 
     private func load() async {
         isLoading = true
         errorMessage = nil
+        // A refresh should also re-read favorites (they may have changed server-side).
+        favoriteOcIds = nil
         updateStatus()
         defer {
             isLoading = false
