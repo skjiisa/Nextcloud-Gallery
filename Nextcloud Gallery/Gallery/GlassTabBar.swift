@@ -10,15 +10,18 @@
 //  Pill gestures:
 //   • tap        → tab switcher
 //   • long-press → Safari-style menu (New Tab / Close Tab / Close Other Tabs)
-//   • drag       → the bar follows your finger in BOTH axes at once: it slides the
-//                  carousel as you move sideways and lifts (with resistance) as you
-//                  pull up. Nothing is axis-locked, so a curved or diagonal swipe is
-//                  fine — the action is decided on RELEASE by where the swipe was
-//                  *heading* (its end position projected forward by its release
-//                  velocity, so a quick flick counts): up past the lift threshold
-//                  opens the switcher, sideways past the carousel threshold changes
-//                  tabs, otherwise everything springs back. A haptic bump fires
-//                  whenever you're in switcher-opening territory.
+//   • drag       → the bar reports both axes raw every frame and the coordinator drives a
+//                  single continuous transform on the carousel (see
+//                  ``RootCarouselViewController``): moving sideways scrubs between tabs,
+//                  pulling up shrinks the current tab into a card with its neighbours peeking
+//                  in alongside — both at once, like a partial swipe-up to the iOS app
+//                  switcher. Nothing is axis-locked or mode-switched; a curved or diagonal
+//                  swipe just blends the two. A haptic bumps once the drag is far enough up
+//                  that releasing would open the switcher. The action is decided on RELEASE by
+//                  where the drag was *heading* (end position projected forward by release
+//                  velocity, so a quick flick counts): a projected up-flick past the threshold
+//                  opens the switcher (the shrunk card flies into its grid slot), sideways past
+//                  the carousel threshold changes tabs, otherwise everything springs back.
 //
 //  VoiceOver: the pill activates to the switcher and carries rotor custom actions for
 //  new / next / previous / close tab, since none of the above gestures are reachable
@@ -45,17 +48,16 @@ final class GlassTabBar: UIView {
     var onCloseOtherTabs: (() -> Void)?
     var onNextTab: (() -> Void)?
     var onPrevTab: (() -> Void)?
-    var onDragChanged: ((CGFloat) -> Void)?
-    /// `(translation, velocity)` of the horizontal drag at release, in window points /
-    /// pts-per-sec, so the carousel can flick-switch and continue the momentum.
-    var onDragEnded: ((CGFloat, CGFloat) -> Void)?
-    /// When a drag resolves to opening the switcher: park the carousel at the active
-    /// tab *instantly* so the card snapshot is clean, remembering where the finger
-    /// left it. Paired with `onBounceToRest`.
-    var onParkForSnapshot: (() -> Void)?
-    /// Spring the carousel from where the finger left it back to the active tab, so the
-    /// reset reads as a bounce rather than a pop. Runs right after the snapshot.
-    var onBounceToRest: (() -> Void)?
+    /// The drag moved. `(location, up, side)` in window space: the finger's point, how far
+    /// above the start it is, and its signed sideways travel. The bar itself never decides
+    /// between carousel and lift — it just reports the raw drag every frame and lets the
+    /// coordinator drive both, so the user can change their mind freely until release.
+    var onDrag: ((CGPoint, CGFloat, CGFloat) -> Void)?
+    /// The finger let go: `(location, up, side, velocity)` in window space / points / pts-per-
+    /// sec, so the coordinator commits whichever action the release crossed (or settles).
+    var onDragRelease: ((CGPoint, CGFloat, CGFloat, CGPoint) -> Void)?
+    /// The gesture was cancelled by the system — settle everything back, commit nothing.
+    var onDragCancel: (() -> Void)?
 
     static let preferredHeight: CGFloat = 56
 
@@ -78,14 +80,12 @@ final class GlassTabBar: UIView {
     /// "Close Other Tabs" when there's only one.
     private var tabCount = 1
 
-    // Drag state. The pan follows both axes freely; the only latched bit of state is
-    // whether the sideways move has grown enough to start driving the carousel (so a
-    // near-vertical swipe doesn't needlessly mount neighbour pages).
-    private var carouselEngaged = false
-    private static let carouselSlop: CGFloat = 10
-    private let liftThreshold: CGFloat = 72
-    private let maxLift: CGFloat = 92
+    // The pan reports both axes raw every frame; the coordinator decides between carousel and
+    // lift and can switch between them mid-drag, so nothing is latched here. `hapticArmed`
+    // fires one bump when the drag first looks like it'll open the switcher on release.
     private var hapticArmed = false
+    /// Upward travel at which releasing would open the switcher — used only to arm the haptic.
+    private let liftThreshold: CGFloat = 72
     private let haptic = UIImpactFeedbackGenerator(style: .medium)
 
     override init(frame: CGRect) {
@@ -265,111 +265,48 @@ final class GlassTabBar: UIView {
     @objc private func settingsTapped() { onSettings?() }
     @objc private func pillTapped() { onShowTabs?() }
 
-    // MARK: - Drag (carousel + lift-to-switcher, unified)
+    // MARK: - Drag (carousel + lift-to-switcher, decided by the coordinator at release)
 
     @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
         // Window space: the bar rides the carousel + its own lift, so only the touch's
         // own translation is a clean read of how far the finger has moved.
         let t = recognizer.translation(in: window)
-        let up = max(0, -t.y)       // how far up (the bar only lifts upward)
+        let loc = recognizer.location(in: window)
+        let up = max(0, -t.y)       // how far up
         let side = t.x              // signed sideways travel
 
         switch recognizer.state {
         case .began:
-            carouselEngaged = false
             hapticArmed = false
             haptic.prepare()
 
         case .changed:
-            // Drive both axes at once so the bar tracks the finger wherever it goes;
-            // the carousel only kicks in once there's a real sideways intent.
-            if !carouselEngaged, abs(side) > Self.carouselSlop { carouselEngaged = true }
-            if carouselEngaged { onDragChanged?(side) }
-            applyLift(up)
+            // Report the raw drag — the coordinator drives carousel vs. lift and can swap
+            // between them as the finger changes direction; nothing is committed yet.
             updateLiftHaptic(up: up, side: abs(side))
+            onDrag?(loc, up, side)
 
         case .ended:
-            commit(up: up, side: side, velocity: recognizer.velocity(in: window))
+            onDragRelease?(loc, up, side, recognizer.velocity(in: window))
 
         case .cancelled, .failed:
-            // No commit on a system-cancelled gesture — just settle everything back.
-            springBarDown()
-            onDragEnded?(0, 0)
+            onDragCancel?()
 
         default:
             break
         }
     }
 
-    /// Resolves a finished drag by where it was *heading*, not how it started: the end
-    /// position is projected forward by the release velocity (so a quick flick counts
-    /// even on little travel), then the dominant projected axis wins if it clears its
-    /// threshold.
-    private func commit(up: CGFloat, side: CGFloat, velocity: CGPoint) {
-        let glide: CGFloat = 0.2   // ~a fifth of a second of coast, matching the carousel
-        let projUp = up + max(0, -velocity.y) * glide
-        let projSide = side + velocity.x * glide
-
-        if projUp >= abs(projSide) {
-            // Up-swipe (or up-flick) wins.
-            if projUp >= liftThreshold {
-                // Open the switcher. A flick may not have armed the predictive bump, so
-                // fire it now.
-                if !hapticArmed { haptic.impactOccurred() }
-                // Park the bar and carousel at rest just long enough to take a clean
-                // card snapshot — this whole block runs in one turn of the run loop, so
-                // no in-between frame is ever drawn — then let both BOUNCE home from
-                // where the finger left them instead of popping.
-                let lifted = transform
-                transform = .identity
-                onParkForSnapshot?()
-                onShowTabs?()           // captures the card, then presents the switcher
-                transform = lifted
-                springBarDown()
-                onBounceToRest?()
-            } else {
-                springBarDown()
-                onDragEnded?(0, 0)   // settle the carousel back on the active tab
-            }
-        } else {
-            // Sideways wins — hand the snap/threshold decision (and the momentum) to
-            // the carousel.
-            springBarDown()
-            onDragEnded?(side, velocity.x)
-        }
-    }
-
-    /// Lifts the bar with rubber-band resistance: follows the finger at first, then
-    /// resists — asymptotic to `maxLift`.
-    private func applyLift(_ up: CGFloat) {
-        let lift = maxLift * (1 - exp(-up / maxLift))
-        transform = CGAffineTransform(translationX: 0, y: -lift)
-    }
-
-    /// Fires a single haptic bump exactly while releasing *would* open the switcher —
-    /// i.e. the up-swipe is both winning and past the threshold — so the bump always
-    /// predicts the outcome, even mid-diagonal.
+    /// Bumps once when the drag first looks like a release would open the switcher (clearly
+    /// upward, past the threshold), re-arming if it stops looking that way so a wavering drag
+    /// can announce it again.
     private func updateLiftHaptic(up: CGFloat, side: CGFloat) {
-        let willOpenSwitcher = up >= liftThreshold && up >= side
-        if willOpenSwitcher, !hapticArmed {
+        let willLift = up >= liftThreshold && up >= side
+        if willLift, !hapticArmed {
             haptic.impactOccurred()
             hapticArmed = true
-        } else if !willOpenSwitcher {
+        } else if !willLift {
             hapticArmed = false
-        }
-    }
-
-    /// Settles the lifted bar back down — a soft spring, or a brief fade under Reduce
-    /// Motion so there's no overshoot.
-    private func springBarDown() {
-        if UIAccessibility.isReduceMotionEnabled {
-            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
-                self.transform = .identity
-            }
-        } else {
-            UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.72, initialSpringVelocity: 0.4, options: [.allowUserInteraction]) {
-                self.transform = .identity
-            }
         }
     }
 }

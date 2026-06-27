@@ -63,6 +63,19 @@ final class PhotoViewerController: UIViewController {
     /// The app's bottom tab bar, shown over the viewer (viewer mode: just the tab
     /// pill → switcher, New tab, Settings). Keeps tab context while viewing a photo.
     private let tabBar = GlassTabBar()
+    /// The viewer's bottom bar, exposed so the tab page can animate it for the switcher
+    /// transition (it's overlaid live rather than baked into the snapshot).
+    var liftBar: GlassTabBar { tabBar }
+
+    /// A snapshot of the photo WITHOUT the bottom tab bar, for the switcher card/cell. The
+    /// bar is a child of this view, so it's hidden during the render (`afterScreenUpdates`
+    /// must be true for the hide to take effect).
+    func contentSnapshot() -> UIImage? {
+        let wasHidden = tabBar.isHidden
+        tabBar.isHidden = true
+        defer { tabBar.isHidden = wasHidden }
+        return WindowSnapshot.render(view, afterScreenUpdates: true)
+    }
     private var filmstrip: PhotoFilmstripView!
     private var barObservation: ObservationToken?
 
@@ -174,10 +187,9 @@ final class PhotoViewerController: UIViewController {
         tabBar.onNextTab = { [weak self] in self?.tabs.selectNext() }
         tabBar.onPrevTab = { [weak self] in self?.tabs.selectPrevious() }
         tabBar.onLockToggle = { [weak self] in self?.toggleZoomLock() }
-        tabBar.onDragChanged = { [weak self] tx in self?.dragHandler?.carouselDragChanged(translation: tx) }
-        tabBar.onDragEnded = { [weak self] tx, v in self?.dragHandler?.carouselDragEnded(translation: tx, velocity: v) }
-        tabBar.onParkForSnapshot = { [weak self] in self?.dragHandler?.carouselParkForSnapshot() }
-        tabBar.onBounceToRest = { [weak self] in self?.dragHandler?.carouselBounceToActive() }
+        tabBar.onDrag = { [weak self] loc, up, side in self?.dragHandler?.dragChanged(at: loc, up: up, side: side) }
+        tabBar.onDragRelease = { [weak self] loc, up, side, v in self?.dragHandler?.dragEnded(at: loc, up: up, side: side, velocity: v) }
+        tabBar.onDragCancel = { [weak self] in self?.dragHandler?.dragCancelled() }
 
         view.addSubview(tabBar)
         view.addSubview(topBar)

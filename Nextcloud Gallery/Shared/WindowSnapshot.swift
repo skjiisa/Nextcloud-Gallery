@@ -2,32 +2,23 @@
 //  WindowSnapshot.swift
 //  Nextcloud Gallery
 //
-//  Grabs a bitmap of what's on screen, used to fill the tab switcher's cards with
-//  a live thumbnail of each tab as it looked when you last left it.
+//  Renders a view to a bitmap, used to fill the tab switcher's cards with a thumbnail of
+//  each tab as it looked when you last left it (and the lifted bar ghost).
 //
 
 import UIKit
 
 enum WindowSnapshot {
-    /// Renders the current foreground window to an image. Fast (`afterScreenUpdates:
-    /// false` captures the already-drawn frame), so it's safe to call synchronously
-    /// just before switching tabs or opening the switcher.
+    /// Renders an arbitrary view's current content to an image (tab cards, the lifted
+    /// bar ghost, etc.). Honours the view's screen scale. Pass `afterScreenUpdates: true`
+    /// when the render must reflect changes made in the same run loop (e.g. a just-hidden
+    /// subview) — `false` captures the already-drawn frame and ignores them.
     @MainActor
-    static func capture() -> UIImage? {
-        guard let window = keyWindow else { return nil }
+    static func render(_ view: UIView, afterScreenUpdates: Bool = false) -> UIImage? {
+        guard view.bounds.width > 0, view.bounds.height > 0 else { return nil }
         let format = UIGraphicsImageRendererFormat()
-        format.scale = window.screen.scale
-        let renderer = UIGraphicsImageRenderer(bounds: window.bounds, format: format)
-        return renderer.image { _ in
-            window.drawHierarchy(in: window.bounds, afterScreenUpdates: false)
-        }
-    }
-
-    @MainActor
-    private static var keyWindow: UIWindow? {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows)
-            .first { $0.isKeyWindow }
+        format.scale = view.window?.screen.scale ?? 0   // 0 → device scale
+        let renderer = UIGraphicsImageRenderer(bounds: view.bounds, format: format)
+        return renderer.image { _ in view.drawHierarchy(in: view.bounds, afterScreenUpdates: afterScreenUpdates) }
     }
 }

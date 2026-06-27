@@ -12,6 +12,9 @@ final class TabSwitcherViewController: UIViewController {
     private let tabs: TabsModel
     private var collectionView: UICollectionView!
     private var observation: ObservationToken?
+    /// While set, this tab's card body is hidden (its title stays) so its snapshot can
+    /// fly into the empty slot during the lift-to-switcher gesture. See ``setCardHidden``.
+    private var hiddenTabID: UUID?
 
     init(tabs: TabsModel) {
         self.tabs = tabs
@@ -77,7 +80,7 @@ final class TabSwitcherViewController: UIViewController {
             let width = env.container.effectiveContentSize.width
             let columns = max(2, Int((width - inset * 2 + spacing) / (150 + spacing)))
             let itemWidth = (width - inset * 2 - spacing * CGFloat(columns - 1)) / CGFloat(columns)
-            let cardHeight = itemWidth / 0.72 + 28 // card + title
+            let cardHeight = itemWidth / TabCardCell.cardAspect + 28 // card + title
 
             let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .fractionalWidth(1.0 / CGFloat(columns)), heightDimension: .fractionalHeight(1)))
             let group = NSCollectionLayoutGroup.horizontal(
@@ -90,6 +93,45 @@ final class TabSwitcherViewController: UIViewController {
             section.contentInsets = NSDirectionalEdgeInsets(top: inset, leading: inset, bottom: inset, trailing: inset)
             return section
         }
+    }
+
+    // MARK: - Lift-to-switcher support
+
+    /// The frame of `tab`'s card *body* (excluding its title) in `space`, scrolling the
+    /// grid to bring it on-screen first if needed. Used to fly the lifted tab into — and
+    /// later out of — its slot. Nil if the tab isn't in the grid.
+    func cardFrame(forTab id: UUID, in space: UICoordinateSpace) -> CGRect? {
+        guard let idx = tabs.tabs.firstIndex(where: { $0.id == id }) else { return nil }
+        let indexPath = IndexPath(item: idx, section: 0)
+        view.layoutIfNeeded()
+        if !isCellFullyVisible(indexPath) {
+            collectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: false)
+            collectionView.layoutIfNeeded()
+        }
+        // Prefer the realized cell's exact card-body frame so the flying card lands
+        // pixel-perfect; fall back to a computed rect if the cell isn't realized.
+        if let cell = collectionView.cellForItem(at: indexPath) as? TabCardCell {
+            return cell.cardBodyFrame(in: space)
+        }
+        guard let attr = collectionView.layoutAttributesForItem(at: indexPath) else { return nil }
+        let cell = attr.frame
+        let cardRect = CGRect(x: cell.minX, y: cell.minY, width: cell.width, height: cell.width / TabCardCell.cardAspect)
+        return collectionView.convert(cardRect, to: space)
+    }
+
+    /// Hides (or restores) just `tab`'s card body so its snapshot can stand in as the
+    /// flying card. The title stays put, marking where the card will land.
+    func setCardHidden(_ hidden: Bool, forTab id: UUID) {
+        hiddenTabID = hidden ? id : nil
+        guard let idx = tabs.tabs.firstIndex(where: { $0.id == id }) else { return }
+        let cell = collectionView.cellForItem(at: IndexPath(item: idx, section: 0)) as? TabCardCell
+        cell?.isCardHidden = hidden
+    }
+
+    private func isCellFullyVisible(_ indexPath: IndexPath) -> Bool {
+        guard let attr = collectionView.layoutAttributesForItem(at: indexPath) else { return false }
+        let visible = collectionView.bounds.inset(by: collectionView.adjustedContentInset)
+        return visible.contains(attr.frame)
     }
 
     @objc private func newTab() {
@@ -113,6 +155,7 @@ extension TabSwitcherViewController: UICollectionViewDataSource, UICollectionVie
         cell.configure(snapshot: tab.snapshot, title: tab.title, isActive: tab.id == tabs.activeTabID) { [weak self] in
             self?.tabs.closeTab(tab.id)
         }
+        cell.isCardHidden = (tab.id == hiddenTabID)
         return cell
     }
 
@@ -128,19 +171,38 @@ extension TabSwitcherViewController: UICollectionViewDataSource, UICollectionVie
 final class TabCardCell: UICollectionViewCell {
     static let reuseID = "TabCardCell"
 
+    /// Card body corner radius and width/height aspect, shared with the lift-to-switcher
+    /// flying card (``RootCarouselViewController``) so the card that flies in matches the
+    /// cell it lands on exactly, and with the switcher layout so the card sub-rect lines up.
+    static let cornerRadius: CGFloat = 14
+    static let cardAspect: CGFloat = 0.72
+
     private let card = UIView()
     private let imageView = UIImageView()
     private let placeholder = UIImageView(image: UIImage(systemName: "photo.on.rectangle.angled"))
     private let titleLabel = UILabel()
     private let closeButton = UIButton(type: .system)
-    private let cornerRadius: CGFloat = 14
 
     private var onClose: (() -> Void)?
+
+    /// Hides just the card body (the title stays) so the active tab's slot sits empty
+    /// while its snapshot flies in on the lift gesture, then is revealed on landing.
+    var isCardHidden: Bool {
+        get { card.isHidden }
+        set { card.isHidden = newValue }
+    }
+
+    /// The exact frame of the card body in `space` — what the lift card flies into / out
+    /// of, so its landing lines up pixel-for-pixel (the title label's real height differs
+    /// from the layout's reserved estimate, so a computed rect lands slightly off).
+    func cardBodyFrame(in space: UICoordinateSpace) -> CGRect {
+        card.convert(card.bounds, to: space)
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
 
-        card.layer.cornerRadius = cornerRadius
+        card.layer.cornerRadius = Self.cornerRadius
         card.layer.cornerCurve = .continuous
         card.clipsToBounds = true
         card.backgroundColor = .tertiarySystemFill
@@ -214,6 +276,7 @@ final class TabCardCell: UICollectionViewCell {
         super.prepareForReuse()
         imageView.image = nil
         placeholder.isHidden = false
+        card.isHidden = false
     }
 
     @objc private func closeTapped() { onClose?() }
