@@ -33,4 +33,8 @@ nonisolated struct ThumbnailCacheLocation {
     func write(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: .atomic)
     }
+
+    func remove(_ url: URL) {
+        try? FileManager.default.removeItem(at: url)
+    }
 }

@@ -21,8 +21,21 @@ final class ThumbnailImageView: UIView {
         set { imageView.contentMode = newValue }
     }
 
-    /// The thumbnail currently shown, if loaded. Read by the viewer's open
-    /// transition to seed its hero image from the tapped tile.
+    /// A normalized (0...1) crop applied to whatever image is loaded — used to show a
+    /// zoom-locked photo's locked framing. Nil shows the whole image. Set before/with
+    /// `load`; re-applies if the displayed image changes.
+    var crop: CGRect? {
+        didSet {
+            guard crop != oldValue, let full = fullImage else { return }
+            imageView.image = cropped(full)
+        }
+    }
+
+    /// The uncropped image last applied, so `crop` changes can re-derive from it.
+    private var fullImage: UIImage?
+
+    /// The thumbnail currently shown (cropped, if a crop is set), if loaded. Read by the
+    /// viewer's open transition to seed its hero image from the tapped tile.
     var image: UIImage? { imageView.image }
 
     override init(frame: CGRect) {
@@ -82,6 +95,7 @@ final class ThumbnailImageView: UIView {
     func showBlank() {
         cancel()
         currentKeyID = nil
+        fullImage = nil
         imageView.image = nil
         placeholderGlyph.isHidden = true
     }
@@ -95,6 +109,8 @@ final class ThumbnailImageView: UIView {
     func prepareForReuse() {
         cancel()
         currentKeyID = nil
+        fullImage = nil
+        crop = nil
         imageView.image = nil
         showPlaceholder()
     }
@@ -106,12 +122,20 @@ final class ThumbnailImageView: UIView {
 
     private func apply(_ image: UIImage, animated: Bool) {
         placeholderGlyph.isHidden = true
+        fullImage = image
+        let shown = cropped(image)
         guard animated else {
-            imageView.image = image
+            imageView.image = shown
             return
         }
         UIView.transition(with: imageView, duration: 0.15, options: .transitionCrossDissolve) {
-            self.imageView.image = image
+            self.imageView.image = shown
         }
+    }
+
+    /// Applies the current `crop` to `image`, or returns it whole when there's no crop.
+    private func cropped(_ image: UIImage) -> UIImage {
+        guard let crop else { return image }
+        return image.croppedToNormalized(crop)
     }
 }

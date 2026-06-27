@@ -33,6 +33,7 @@ final class RemoteGalleryViewController: UIViewController {
     private var errorMessage: String?
     private var didInitialLoad = false
     private var tabObservation: ObservationToken?
+    private var lockObserver: NSObjectProtocol?
 
     private var appliedZoom: GalleryGridZoom
     private var appliedAspectFill: Bool
@@ -73,10 +74,34 @@ final class RemoteGalleryViewController: UIViewController {
         configureDataSource()
         setUpToolbar()
         observeTab()
+        observeLockChanges()
 
         registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (self: Self, _) in
             self.collectionView.setCollectionViewLayout(self.makeLayout(), animated: false)
         }
+    }
+
+    deinit {
+        if let lockObserver { NotificationCenter.default.removeObserver(lockObserver) }
+    }
+
+    /// Re-render a tile when its photo's zoom lock changes, so the locked crop tracks.
+    private func observeLockChanges() {
+        lockObserver = NotificationCenter.default.addObserver(
+            forName: ZoomLockStore.didChange, object: nil, queue: .main
+        ) { [weak self] note in
+            let ocId = note.userInfo?["ocId"] as? String
+            MainActor.assumeIsolated { self?.reconfigureItem(ocId: ocId) }
+        }
+    }
+
+    private func reconfigureItem(ocId: String?) {
+        var snapshot = dataSource.snapshot()
+        // Only items still in the snapshot — reconfiguring a stale identifier asserts.
+        let targets = snapshot.itemIdentifiers.filter { ocId == nil || $0.ocId == ocId }
+        guard !targets.isEmpty else { return }
+        snapshot.reconfigureItems(targets)
+        dataSource.apply(snapshot, animatingDifferences: true)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -125,7 +150,8 @@ final class RemoteGalleryViewController: UIViewController {
     private func configureDataSource() {
         let photoCell = UICollectionView.CellRegistration<PhotoGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }
-            cell.configure(with: item, fill: self.browseTab.aspectFill, cornerRadius: self.browseTab.zoom.cornerRadius, store: self.thumbnailStore, client: self.client)
+            cell.configure(with: item, fill: self.browseTab.aspectFill, cornerRadius: self.browseTab.zoom.cornerRadius,
+                           lock: self.environment.zoomLockStore.lock(for: item.ocId), store: self.thumbnailStore, client: self.client)
         }
         // Favorites can include folders; render those as folder tiles.
         let folderCell = UICollectionView.CellRegistration<FolderGridCell, GridItemSnapshot> { [weak self] cell, _, item in

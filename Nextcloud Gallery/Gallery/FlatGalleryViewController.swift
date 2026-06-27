@@ -29,6 +29,7 @@ final class FlatGalleryViewController: UIViewController {
     private var errorMessage: String?
     private var didInitialLoad = false
     private var cacheObserver: NSObjectProtocol?
+    private var lockObserver: NSObjectProtocol?
     private var tabObservation: ObservationToken?
 
     // Last-applied appearance, to tell apart "sort changed → refetch" from
@@ -65,6 +66,7 @@ final class FlatGalleryViewController: UIViewController {
 
     deinit {
         if let cacheObserver { NotificationCenter.default.removeObserver(cacheObserver) }
+        if let lockObserver { NotificationCenter.default.removeObserver(lockObserver) }
     }
 
     override func viewDidLoad() {
@@ -77,6 +79,7 @@ final class FlatGalleryViewController: UIViewController {
         configureDataSource()
         setUpToolbar()
         observeCacheChanges()
+        observeLockChanges()
         observeTab()
 
         registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (self: Self, _) in
@@ -132,7 +135,8 @@ final class FlatGalleryViewController: UIViewController {
     private func configureDataSource() {
         let photoCell = UICollectionView.CellRegistration<PhotoGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }
-            cell.configure(with: item, fill: self.browseTab.aspectFill, cornerRadius: self.browseTab.zoom.cornerRadius, store: self.thumbnailStore, client: self.client)
+            cell.configure(with: item, fill: self.browseTab.aspectFill, cornerRadius: self.browseTab.zoom.cornerRadius,
+                           lock: self.environment.zoomLockStore.lock(for: item.ocId), store: self.thumbnailStore, client: self.client)
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { collectionView, indexPath, item in
             collectionView.dequeueConfiguredReusableCell(using: photoCell, for: indexPath, item: item)
@@ -205,6 +209,27 @@ final class FlatGalleryViewController: UIViewController {
             guard parents.contains(where: { $0 == base || $0.hasPrefix(prefix) }) else { return }
             MainActor.assumeIsolated { self?.reloadFromCache() }
         }
+    }
+
+    /// Re-render a tile when its photo's zoom lock is set or cleared, so the locked
+    /// crop appears/disappears without a full reload.
+    private func observeLockChanges() {
+        lockObserver = NotificationCenter.default.addObserver(
+            forName: ZoomLockStore.didChange, object: nil, queue: .main
+        ) { [weak self] note in
+            let ocId = note.userInfo?["ocId"] as? String
+            MainActor.assumeIsolated { self?.reconfigureItem(ocId: ocId) }
+        }
+    }
+
+    /// Reconfigures the tile for `ocId` (or all tiles when nil) to pick up a lock change.
+    private func reconfigureItem(ocId: String?) {
+        var snapshot = dataSource.snapshot()
+        // Only items still in the snapshot — reconfiguring a stale identifier asserts.
+        let targets = snapshot.itemIdentifiers.filter { ocId == nil || $0.ocId == ocId }
+        guard !targets.isEmpty else { return }
+        snapshot.reconfigureItems(targets)
+        dataSource.apply(snapshot, animatingDifferences: true)
     }
 
     private func reloadFromCache() {
