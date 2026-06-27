@@ -26,6 +26,8 @@ final class PhotoGridCell: UICollectionViewCell {
     private var widthConstraint: NSLayoutConstraint!
     private var heightConstraint: NSLayoutConstraint!
     private var photoAspect: CGFloat = 1
+    /// The aspect ratio the tile fits to (the photo's, or a locked crop's portrait shape).
+    private var tileAspect: CGFloat = 1
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -62,10 +64,15 @@ final class PhotoGridCell: UICollectionViewCell {
         with item: GridItemSnapshot,
         fill: Bool,
         cornerRadius: CGFloat,
+        lock: ZoomLock? = nil,
         store: ThumbnailStore,
         client: NextcloudClient
     ) {
         photoAspect = item.aspectRatio
+        // A locked photo's tile takes its locked crop (a portrait, viewport-shaped slice)
+        // and shows only that region; an unlocked one shows the whole photo.
+        tileAspect = lock?.tileAspect(imageAspect: item.aspectRatio) ?? item.aspectRatio
+        thumbnail.crop = lock?.crop
         applyAppearance(fill: fill, cornerRadius: cornerRadius)
         thumbnail.load(
             ocId: item.ocId, fileId: item.fileId, etag: item.etag,
@@ -81,10 +88,10 @@ final class PhotoGridCell: UICollectionViewCell {
         let wMult: CGFloat, hMult: CGFloat
         if fill {
             (wMult, hMult) = (1, 1)
-        } else if photoAspect >= 1 {
-            (wMult, hMult) = (1, 1 / photoAspect) // landscape: full width, shorter height
+        } else if tileAspect >= 1 {
+            (wMult, hMult) = (1, 1 / tileAspect) // landscape: full width, shorter height
         } else {
-            (wMult, hMult) = (photoAspect, 1)     // portrait: full height, narrower width
+            (wMult, hMult) = (tileAspect, 1)     // portrait: full height, narrower width
         }
 
         // A constraint's multiplier is immutable, so swap the width/height constraints.

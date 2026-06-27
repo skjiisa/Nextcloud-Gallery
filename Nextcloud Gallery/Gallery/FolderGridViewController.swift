@@ -32,6 +32,7 @@ final class FolderGridViewController: UIViewController {
     private var errorMessage: String?
     private var didInitialLoad = false
     private var cacheObserver: NSObjectProtocol?
+    private var lockObserver: NSObjectProtocol?
 
     /// Whether this folder contains any subfolder — drives the bottom bar's Gallery
     /// toggle (a folder with no subfolders is already shown flat, so the toggle is
@@ -60,6 +61,7 @@ final class FolderGridViewController: UIViewController {
 
     deinit {
         if let cacheObserver { NotificationCenter.default.removeObserver(cacheObserver) }
+        if let lockObserver { NotificationCenter.default.removeObserver(lockObserver) }
     }
 
     override func viewDidLoad() {
@@ -71,6 +73,7 @@ final class FolderGridViewController: UIViewController {
         setUpStatusView()
         configureDataSource()
         observeCacheChanges()
+        observeLockChanges()
         observeZoom()
 
         // Rebuild the layout when the size class changes (min cell size differs).
@@ -94,6 +97,25 @@ final class FolderGridViewController: UIViewController {
                 self.collectionView.layoutIfNeeded()
             }
         }
+    }
+
+    /// Re-render a tile when its photo's zoom lock changes, so the locked crop tracks.
+    private func observeLockChanges() {
+        lockObserver = NotificationCenter.default.addObserver(
+            forName: ZoomLockStore.didChange, object: nil, queue: .main
+        ) { [weak self] note in
+            let ocId = note.userInfo?["ocId"] as? String
+            MainActor.assumeIsolated { self?.reconfigureItem(ocId: ocId) }
+        }
+    }
+
+    private func reconfigureItem(ocId: String?) {
+        var snapshot = dataSource.snapshot()
+        // Only items still in the snapshot — reconfiguring a stale identifier asserts.
+        let targets = snapshot.itemIdentifiers.filter { ocId == nil || $0.ocId == ocId }
+        guard !targets.isEmpty else { return }
+        snapshot.reconfigureItems(targets)
+        dataSource.apply(snapshot, animatingDifferences: true)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -142,7 +164,8 @@ final class FolderGridViewController: UIViewController {
     private func configureDataSource() {
         let photoCell = UICollectionView.CellRegistration<PhotoGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }
-            cell.configure(with: item, fill: true, cornerRadius: LayoutMetrics.tileCornerRadius, store: self.thumbnailStore, client: self.client)
+            cell.configure(with: item, fill: true, cornerRadius: LayoutMetrics.tileCornerRadius,
+                           lock: self.environment.zoomLockStore.lock(for: item.ocId), store: self.thumbnailStore, client: self.client)
         }
         let folderCell = UICollectionView.CellRegistration<FolderGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }

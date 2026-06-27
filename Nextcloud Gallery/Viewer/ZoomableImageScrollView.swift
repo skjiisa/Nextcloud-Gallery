@@ -72,9 +72,36 @@ final class ZoomableImageScrollView: UIScrollView, UIScrollViewDelegate {
     var isZoomedIn: Bool { zoomScale > minimumZoomScale + 0.001 }
 
     /// The current zoom + pan as a lockable snapshot, or nil at the rest scale (nothing
-    /// worth locking).
+    /// worth locking). Carries the visible image crop so the grid can mirror the framing.
     var currentLock: ZoomLock? {
-        isZoomedIn ? ZoomLock(scale: zoomScale, offset: contentOffset) : nil
+        isZoomedIn ? ZoomLock(scale: zoomScale, offset: contentOffset, crop: visibleImageCrop) : nil
+    }
+
+    /// The region of the image currently visible in the viewport, normalized to 0...1 in
+    /// the image's own pixel space (top-left origin) and clamped to the image. The grid
+    /// renders this so a locked photo's tile shows exactly its locked framing.
+    var visibleImageCrop: CGRect? {
+        guard let image = imageView.image, image.size.width > 0, image.size.height > 0 else { return nil }
+        let b = bounds.size
+        guard b.width > 0, b.height > 0, zoomScale > 0 else { return nil }
+        // `imageView` is bounds-sized at scale 1 with the image aspect-fit inside it, then
+        // the whole view is scaled by `zoomScale`. Work in the unscaled (bounds) space:
+        // the fitted image rect, and the viewport mapped back through the zoom.
+        let fit = min(b.width / image.size.width, b.height / image.size.height)
+        let fittedW = image.size.width * fit
+        let fittedH = image.size.height * fit
+        let fittedX = (b.width - fittedW) / 2
+        let fittedY = (b.height - fittedH) / 2
+        let visX = contentOffset.x / zoomScale
+        let visY = contentOffset.y / zoomScale
+        let visW = b.width / zoomScale
+        let visH = b.height / zoomScale
+        // Intersect the viewport with the fitted image and normalize to image pixels.
+        let left = max(visX, fittedX), top = max(visY, fittedY)
+        let right = min(visX + visW, fittedX + fittedW), bottom = min(visY + visH, fittedY + fittedH)
+        guard right > left, bottom > top else { return nil }
+        return CGRect(x: (left - fittedX) / fittedW, y: (top - fittedY) / fittedH,
+                      width: (right - left) / fittedW, height: (bottom - top) / fittedH)
     }
 
     /// Adopt `baseline` as the new rest state: it becomes the minimum zoom and the home

@@ -347,13 +347,14 @@ final class PhotoViewerController: UIViewController {
     /// view is in the hierarchy. Falls back to a cross-fade when there's no tile.
     func animateOpen() {
         let id = currentPhotoID
-        let heroImage = source?.viewerSourceImage(forPhotoID: id) ?? currentDisplayedImage
+        // A locked photo is presented as its locked crop: the hero is that cropped slice
+        // (matching the grid tile) and grows to fill the screen, landing on the same
+        // framing the restored page settles to underneath. Unlocked grows the whole photo.
+        let crop = environment.zoomLockStore.lock(for: id)?.crop
+        let heroImage = source?.viewerSourceImage(forPhotoID: id) ?? heroCrop(currentDisplayedImage, crop)
         let sourceFrame = source?.viewerSourceFrame(forPhotoID: id, in: view)
         let aspect = heroImage.map { $0.size.height > 0 ? $0.size.width / $0.size.height : 1 } ?? currentAspectRatio
-        // A locked photo grows straight to its locked framing (not fit-then-pop): the
-        // hero lands on the same zoomed crop the restored page settles to underneath.
-        let fitFrame = fittedRect(forAspectRatio: aspect)
-        let endFrame = environment.zoomLockStore.lock(for: id).map { lockedDisplayRect(fit: fitFrame, lock: $0) } ?? fitFrame
+        let endFrame = fittedRect(forAspectRatio: aspect)
 
         backdropView.alpha = 0
         setChromeAlpha(0)
@@ -371,8 +372,9 @@ final class PhotoViewerController: UIViewController {
         hero.frame = sourceFrame
         hero.layer.cornerRadius = PhotoHero.tileCornerRadius
         insertTransitionHero(hero)
-        // Sharpen the hero as the page's loader yields preview/full stages.
-        onCurrentImageUpgrade = { [weak hero] image in hero?.image = image }
+        // Sharpen the hero as the page's loader yields preview/full stages (re-cropped
+        // to the lock so a locked hero stays on its framing as it sharpens).
+        onCurrentImageUpgrade = { [weak self, weak hero] image in hero?.image = self?.heroCrop(image, crop) ?? image }
 
         UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0, options: [.curveEaseOut]) {
             hero.frame = endFrame
@@ -393,8 +395,9 @@ final class PhotoViewerController: UIViewController {
     /// Shrinks the photo back into its tile, then asks the host to remove us.
     private func animateClose() {
         let id = currentPhotoID
-        let heroImage = currentDisplayedImage ?? source?.viewerSourceImage(forPhotoID: id)
-        let startFrame = currentImageOnScreenRect ?? fittedRect(forAspectRatio: currentAspectRatio)
+        let crop = currentLockCrop
+        let heroImage = heroCrop(currentDisplayedImage, crop) ?? source?.viewerSourceImage(forPhotoID: id)
+        let startFrame = lockedOnScreenFrame(for: heroImage, crop: crop)
         let destFrame = source?.viewerSourceFrame(forPhotoID: id, in: view)
 
         guard let heroImage else {
@@ -457,8 +460,12 @@ final class PhotoViewerController: UIViewController {
 
     private func beginSwipe() {
         swipePhotoID = currentPhotoID
-        swipeStartFrame = currentImageOnScreenRect ?? fittedRect(forAspectRatio: currentAspectRatio)
-        let hero = PhotoHero.makeHeroView(image: currentDisplayedImage ?? source?.viewerSourceImage(forPhotoID: swipePhotoID))
+        // Swipe-to-dismiss is gated to non-zoomed photos, but a locked photo reads as
+        // "not zoomed" at its baseline — so present its crop here too, matching the grid.
+        let crop = currentLockCrop
+        let heroImage = heroCrop(currentDisplayedImage, crop) ?? source?.viewerSourceImage(forPhotoID: swipePhotoID)
+        swipeStartFrame = lockedOnScreenFrame(for: heroImage, crop: crop)
+        let hero = PhotoHero.makeHeroView(image: heroImage)
         hero.frame = swipeStartFrame
         insertTransitionHero(hero)
         swipeHero = hero
@@ -550,13 +557,25 @@ final class PhotoViewerController: UIViewController {
         return CGRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
     }
 
-    /// Where the full image sits on screen at a locked zoom: the fit rect scaled by the
-    /// lock's scale and shifted by its pan, so the viewport crops to the locked framing.
-    /// (Inverse of `ZoomableImageScrollView`'s scale + content-offset.)
-    private func lockedDisplayRect(fit: CGRect, lock: ZoomLock) -> CGRect {
-        CGRect(x: fit.minX * lock.scale - lock.offset.x,
-               y: fit.minY * lock.scale - lock.offset.y,
-               width: fit.width * lock.scale, height: fit.height * lock.scale)
+    /// Applies a lock's crop to a transition hero image, or returns it whole when the
+    /// photo isn't locked. Lets a locked photo's hero stand in for its visible slice.
+    private func heroCrop(_ image: UIImage?, _ crop: CGRect?) -> UIImage? {
+        guard let image else { return nil }
+        guard let crop else { return image }
+        return image.croppedToNormalized(crop)
+    }
+
+    /// The crop for the currently shown photo, if its zoom is locked.
+    private var currentLockCrop: CGRect? { environment.zoomLockStore.lock(for: currentPhotoID)?.crop }
+
+    /// Where the shrink / swipe hero starts on screen. A locked photo's crop fills the
+    /// screen, so it starts at that crop's aspect-fit rect (matching the open hero's end);
+    /// an unlocked photo starts at the live displayed image rect.
+    private func lockedOnScreenFrame(for heroImage: UIImage?, crop: CGRect?) -> CGRect {
+        if crop != nil, let heroImage, heroImage.size.height > 0 {
+            return fittedRect(forAspectRatio: heroImage.size.width / heroImage.size.height)
+        }
+        return currentImageOnScreenRect ?? fittedRect(forAspectRatio: currentAspectRatio)
     }
 
     func setPageContentHidden(_ hidden: Bool) {

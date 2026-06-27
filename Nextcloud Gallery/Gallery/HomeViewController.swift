@@ -229,7 +229,8 @@ final class HomeViewController: UIViewController {
         }
         let favoriteCell = UICollectionView.CellRegistration<PhotoGridCell, GridItemSnapshot> { [weak self] cell, _, item in
             guard let self else { return }
-            cell.configure(with: item, fill: true, cornerRadius: 10, store: self.thumbnailStore, client: self.client)
+            cell.configure(with: item, fill: true, cornerRadius: 10,
+                           lock: self.environment.zoomLockStore.lock(for: item.ocId), store: self.thumbnailStore, client: self.client)
         }
         // Favorites can include folders; render those as folder tiles in the strip.
         let favoriteFolderCell = UICollectionView.CellRegistration<FolderGridCell, GridItemSnapshot> { [weak self] cell, _, item in
