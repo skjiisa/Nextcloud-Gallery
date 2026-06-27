@@ -84,6 +84,31 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     private var lastUpTime: CFTimeInterval = 0
     private var upTrackingStarted = false
 
+    // MARK: Manual settle (philosophy B: step the MODEL transform each frame)
+    //
+    // The release settle steps `container.transform` (the model) toward rest on a
+    // CADisplayLink, exactly like the live drag sets it directly each frame. UIView.animate
+    // wrote the model to identity-scale synchronously on frame 0, which recomputed the page
+    // safe area to full rest in one layout pass — snapping the nav bar + every grid's
+    // adjustedContentInset down by the inset delta while only the presentation animated.
+    // Stepping the model means the safe area recomputes by a small delta each frame and
+    // layout tracks smoothly (the drag is already jump-free for this exact reason).
+
+    /// Drives the settle. One normalized progress spring (0 = release pose, 1 = settled) so
+    /// scale / tx / ty all reach rest together on a single rest test in consistent units.
+    private var settleLink: CADisplayLink?
+    private var settleProgress = SpringScalar()
+    /// Frozen at release: the pose to interpolate FROM (the live on-screen transform) and the
+    /// resting pose to interpolate TO. We lerp every field by the spring's progress so nothing
+    /// can overshoot scale past 1 (which would re-inset the safe area the other way).
+    private var settleFromTx: CGFloat = 0
+    private var settleFromTy: CGFloat = 0
+    private var settleFromScale: CGFloat = 1
+    private var settleToTx: CGFloat = 0
+    /// Runs once the settle reaches rest (switch tab, rebuild). Cleared on interruption.
+    private var settleCompletion: (() -> Void)?
+    private var settleLastTime: CFTimeInterval = 0
+
     private var structureObservation: ObservationToken?
     private var switcherObservation: ObservationToken?
     private var settingsObservation: ObservationToken?
@@ -179,6 +204,9 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
 
     /// Mounts only the active tab (the at-rest state) and positions it centered.
     private func rebuildActive() {
+        // Canonical return-to-rest: stop any in-flight settle before we snap to identity, so its
+        // link can't keep stepping the transform afterwards (no handoff — we're resetting anyway).
+        cancelSettle(handoff: false)
         pruneClosedTabs()
         let active = tabs.activeTab
         for id in mountedIDs where id != active.id { unmount(id) }
@@ -217,6 +245,12 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     func dragChanged(at location: CGPoint, up: CGFloat, side: CGFloat) {
         // Bail only once the switcher is committed-open.
         guard !tabs.isShowingSwitcher, !closingSwitcher else { return }
+        // A finger landed during an in-flight settle. Cancel it (WITHOUT firing its
+        // completion, which would switch tabs + rebuild out from under the new gesture) so
+        // the settle stepper and this drag don't both write container.transform. isDragging
+        // stays true through the whole settle, so this must run before startCarouselIfNeeded's
+        // `guard !isDragging` — otherwise it would never get the chance to take over.
+        cancelSettle(handoff: true)
         startCarouselIfNeeded(at: location)
         applyDrag(up: up, side: side, at: location)
     }
@@ -397,29 +431,110 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         }
         let settled = -CGFloat(target - active) * slot
         if target != active { selectionHaptic.selectionChanged() }
-        // Carry the finger's speed into the spring so the snap continues the flick.
-        let remaining = max(1, abs(settled - container.transform.tx))
-        let initialV = min(abs(velocity) / remaining, 6)
-        // Open the crop masks back to full alongside the spring (sublayers a UIView animation
-        // block won't touch), then unwind the bar + neighbour fades inside the spring itself.
         let dur: TimeInterval = UIAccessibility.isReduceMotionEnabled ? 0.2 : 0.35
+        // The crop masks + bar/neighbour fades do NOT drive page layout, so they stay on their
+        // own CA / UIView curves over the same duration — they finish together with the settle.
         for id in mountedIDs { controllers[id]?.animateLiftReset(duration: dur) }
         tearDownLiftGrid(animated: true)   // fade the revealed picker away as the carousel grows back
-        animateSnap(initialVelocity: initialV) {
-            // A plain translate (scale back to 1, no rise) un-shrinks the carousel and slides
-            // the chosen tab to centre in one spring.
-            self.container.transform = CGAffineTransform(translationX: settled, y: 0)
+        UIView.animate(withDuration: dur, delay: 0, options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]) {
             for id in self.mountedIDs {
                 self.controllers[id]?.setBarAlpha(1)
                 self.controllers[id]?.view.alpha = 1
             }
-        } completion: {
+        }
+        // The container itself un-shrinks + slides to centre by STEPPING the model transform
+        // each frame (no UIView.animate model snap), so the page safe area — and thus the nav
+        // bar + every grid's adjustedContentInset — recomputes smoothly frame-by-frame.
+        startSettle(toTx: settled, velocityX: velocity, reduceMotion: UIAccessibility.isReduceMotionEnabled) {
             if target != active {
                 self.tabs.activeTabID = self.tabs.tabs[target].id
                 self.tabs.save()
             }
             self.isDragging = false
             self.rebuildActive()
+        }
+    }
+
+    // MARK: Manual settle driver
+
+    /// Starts the manual container settle. Captures the live (presentation) transform as the
+    /// "from" pose, the resting pose (identity scale, `toTx` translate, ty 0) as "to", and
+    /// steps a single normalized progress spring 0→1 on a CADisplayLink — lerping scale / tx /
+    /// ty by that progress so they reach rest together and scale can never overshoot past 1.
+    private func startSettle(toTx: CGFloat, velocityX: CGFloat, reduceMotion: Bool, completion: @escaping () -> Void) {
+        // Seed from the live presentation transform so a re-grab→release (or a flick spring
+        // still in flight) hands off without a jump; pin the model there and stop any CA spring.
+        let current = container.layer.presentation()?.affineTransform() ?? container.transform
+        container.layer.removeAllAnimations()
+        container.transform = current
+
+        settleFromTx = current.tx
+        settleFromTy = current.ty
+        settleFromScale = current.a            // no rotation in this hierarchy, so a == scaleX
+        settleToTx = toTx
+
+        // Convert the release x-velocity (window pts/sec) into progress/sec: progress spans the
+        // tx travel, so dp = dx / travel. Capped to keep the spring stable on a hard flick.
+        let travel = abs(settleToTx - settleFromTx)
+        let progressVelocity: CGFloat = travel > 1 ? min(max(-velocityX / travel, -8), 8) : 0
+
+        // Reduce Motion: critically damped (no overshoot), a hair stiffer so it's brief.
+        settleProgress.dampingRatio = reduceMotion ? 1.0 : 0.85
+        settleProgress.stiffness = reduceMotion ? (44 * 44) : (36 * 36)
+        settleProgress.reset(value: 0, velocity: progressVelocity, target: 1)
+
+        settleCompletion = completion
+        settleLastTime = CACurrentMediaTime()
+        if settleLink == nil {
+            let link = CADisplayLink(target: self, selector: #selector(stepSettle))
+            link.add(to: .main, forMode: .common)
+            settleLink = link
+        }
+    }
+
+    @objc private func stepSettle(_ link: CADisplayLink) {
+        let now = link.timestamp
+        let dt = CGFloat(max(0, now - settleLastTime))
+        settleLastTime = now
+        guard dt > 0 else { return }
+
+        let live = settleProgress.step(dt)
+        applySettlePose(progress: settleProgress.value)
+        if !live { finishSettle() }
+    }
+
+    /// Lerps the container transform between the release pose and the resting pose by `p`.
+    private func applySettlePose(progress p: CGFloat) {
+        let scale = settleFromScale + (1 - settleFromScale) * p
+        let tx = settleFromTx + (settleToTx - settleFromTx) * p
+        let ty = settleFromTy + (0 - settleFromTy) * p
+        container.transform = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale)
+    }
+
+    /// Lands exactly on the resting pose (p = 1 ⇒ identity scale, settled tx, ty 0) so there is
+    /// no sub-pixel residue to snap, then fires the completion (rebuildActive resets to identity).
+    private func finishSettle() {
+        settleLink?.invalidate()
+        settleLink = nil
+        settleProgress.settle()
+        applySettlePose(progress: 1)
+        let completion = settleCompletion
+        settleCompletion = nil
+        completion?()
+    }
+
+    /// Stops an in-flight settle. `handoff` pins the model to the live presentation so a new
+    /// drag continues from where the settle visually was; the completion is dropped either way
+    /// (the new gesture, or whatever supersedes it, decides the final state).
+    private func cancelSettle(handoff: Bool) {
+        guard settleLink != nil else { return }
+        settleLink?.invalidate()
+        settleLink = nil
+        settleCompletion = nil
+        if handoff {
+            let live = container.layer.presentation()?.affineTransform() ?? container.transform
+            container.layer.removeAllAnimations()
+            container.transform = live
         }
     }
 
@@ -430,6 +545,9 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
     /// flies the card into its slot. The live carousel is reset beneath the now-opaque grid.
     private func commitLift(progress: CGFloat, velocity: CGPoint) {
         let activeID = tabs.activeTabID
+        // Defensive: a commit normally follows a fresh drag, but if one arrives while a settle
+        // is in flight, pin the model to the live position so the snapshot frame below matches.
+        cancelSettle(handoff: true)
         // If a fast flick is still springing the carousel, freeze it at its current on-screen
         // position first, so the snapshot card starts exactly where the tab visually is rather
         // than where the spring was heading (otherwise the hand-off jumps).
@@ -522,19 +640,6 @@ final class RootCarouselViewController: UIViewController, CarouselDragHandling {
         } completion: { _ in completion() }
     }
 
-    /// Runs the carousel's snap-into-place animation, honouring Reduce Motion (a short
-    /// linear settle instead of a spring with overshoot).
-    private func animateSnap(initialVelocity: CGFloat, _ animations: @escaping () -> Void, completion: @escaping () -> Void) {
-        if UIAccessibility.isReduceMotionEnabled {
-            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]) {
-                animations()
-            } completion: { _ in completion() }
-        } else {
-            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: initialVelocity, options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]) {
-                animations()
-            } completion: { _ in completion() }
-        }
-    }
 
     // MARK: - Switcher (child) & settings (modal) reconciliation
 
@@ -675,4 +780,49 @@ extension RootCarouselViewController: UIAdaptivePresentationControllerDelegate {
         settingsVC = nil
         tabs.isShowingSettings = false
     }
+}
+
+// MARK: - Settle spring
+
+/// A damped harmonic oscillator for one scalar, advanced by explicit dt each frame so the
+/// settle can be driven off a CADisplayLink (stepping the MODEL container transform, unlike
+/// UIView.animate which snaps the model and only animates the presentation). Tuned to feel
+/// like the old `usingSpringWithDamping: 0.85` ~0.35s settle. Integrated semi-implicitly
+/// (symplectic Euler), stable at 60–120 Hz for the stiffnesses used here.
+struct SpringScalar {
+    var value: CGFloat = 0
+    var velocity: CGFloat = 0
+    var target: CGFloat = 0
+    /// ω² (ω ≈ 36 rad/s ≈ a 0.35s settle clearly arrived by completion).
+    var stiffness: CGFloat = 36 * 36
+    /// 1.0 == critically damped (no overshoot); 0.85 == a little liveliness, like the old spring.
+    var dampingRatio: CGFloat = 0.85
+
+    private var omega: CGFloat { sqrt(stiffness) }
+    private var damping: CGFloat { 2 * dampingRatio * omega }
+
+    mutating func reset(value: CGFloat, velocity: CGFloat, target: CGFloat) {
+        self.value = value; self.velocity = velocity; self.target = target
+    }
+
+    /// Advances one step of `dt` seconds. Returns false once settled (so the caller can land on
+    /// target and stop the link). Sub-steps so a dropped frame can't overshoot the integrator.
+    @discardableResult
+    mutating func step(_ dt: CGFloat) -> Bool {
+        var remaining = min(dt, 1.0 / 30.0)
+        let h: CGFloat = 1.0 / 240.0
+        while remaining > 0 {
+            let s = min(h, remaining)
+            let accel = -stiffness * (value - target) - damping * velocity
+            velocity += accel * s
+            value += velocity * s
+            remaining -= s
+        }
+        return !isAtRest
+    }
+
+    /// Rest test in the spring's own (here: normalized progress) units: close in value AND slow.
+    var isAtRest: Bool { abs(value - target) < 0.001 && abs(velocity) < 0.01 }
+
+    mutating func settle() { value = target; velocity = 0 }
 }
