@@ -190,9 +190,10 @@ final class FlatGalleryViewController: UIViewController {
     private func updateToolbar() {
         sortItem.menu = makeSortMenu()
         filterItem.menu = makeFilterMenu()
-        // Fill the funnel when any filter is on, so the active state reads at a glance.
+        // Fill the funnel when any filter is on, so the active state reads at a glance;
+        // a plain (circle-free) funnel when off.
         let filtering = !browseTab.filter.isEmpty
-        filterItem.image = UIImage(systemName: filtering ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+        filterItem.image = UIImage(systemName: filtering ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
         aspectItem.image = UIImage(systemName: browseTab.aspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
     }
 
@@ -213,6 +214,10 @@ final class FlatGalleryViewController: UIViewController {
         let zoomChanged = zoom != appliedZoom
         let aspectChanged = aspectFill != appliedAspectFill
         let filterChanged = filter != appliedFilter
+        // Favorites are toggled in the viewer (a sibling overlay that doesn't refresh
+        // this screen), so a cached favorites set goes stale. Re-fetch it whenever the
+        // favorites filter is switched on, so a just-favorited photo shows up.
+        let favoritesTurnedOn = filter.contains(.favorites) && !appliedFilter.contains(.favorites)
         appliedSort = sort; appliedZoom = zoom; appliedAspectFill = aspectFill; appliedFilter = filter
 
         updateToolbar()
@@ -220,6 +225,7 @@ final class FlatGalleryViewController: UIViewController {
         // just re-filters the items already in hand.
         if sortChanged { reloadFromCache() }
         else if filterChanged { applyFilter() }
+        if favoritesTurnedOn { loadFavoritesIfNeeded(force: true) }
         guard zoomChanged || aspectChanged else { return }
 
         // One bouncy spring drives the whole change: the column/size change (zoom)
@@ -278,11 +284,14 @@ final class FlatGalleryViewController: UIViewController {
         updateStatus()
     }
 
-    /// Fetches the account's favorited ids once, then re-applies the filter. Favorites
-    /// live on the server (not the cache), so this is a one-shot network read cached
-    /// for the screen's lifetime; ``load`` invalidates it so a refresh re-reads them.
-    private func loadFavoritesIfNeeded() {
-        guard favoriteOcIds == nil, !isLoadingFavorites else { return }
+    /// Fetches the account's favorited ids, then re-applies the filter. Favorites live
+    /// on the server (not the cache), so the set is cached for the screen's lifetime and
+    /// only re-read when needed: `force` re-fetches an already-loaded set (favorites
+    /// changed in the viewer, or the filter was just switched on), keeping the current
+    /// results visible while it refreshes; ``load`` (pull-to-refresh) clears it outright.
+    private func loadFavoritesIfNeeded(force: Bool = false) {
+        guard !isLoadingFavorites else { return }
+        if !force, favoriteOcIds != nil { return }
         isLoadingFavorites = true
         favoritesError = nil
         updateStatus()
