@@ -298,16 +298,40 @@ final class PhotoViewerController: UIViewController {
     private func toggleZoomLock() {
         guard let photo = currentPhoto else { return }
         let store = environment.zoomLockStore
-        if store.isLocked(photo.id) {
+        if let existing = store.lock(for: photo.id) {
             store.removeLock(for: photo.id)
             currentPageVC?.clearLock()
+            evictLockedThumbnail(for: photo, lock: existing)
         } else if let lock = currentPageVC?.currentLock {
             store.setLock(lock, for: photo.id)
             // Adopt it live so the current zoom immediately becomes the new baseline.
             currentPageVC?.applyLock(lock)
+            cacheLockedThumbnail(for: photo, lock: lock)
         }
         selectionHaptic.selectionChanged()
         configureTabBar()
+    }
+
+    /// Once a lock is saved, warm a higher-resolution copy at the crop's resolution so the
+    /// grid's cropped tile is sharp. No-op when the lock reuses the grid thumbnail (barely
+    /// zoomed) — that copy is already cached for the normal tile.
+    private func cacheLockedThumbnail(for photo: PhotoItem, lock: ZoomLock) {
+        let pixels = lock.thumbnailPixels
+        guard pixels != NextcloudConfig.gridThumbnailPixels, let client = environment.client else { return }
+        ImageLoader.shared.prefetch(
+            ocId: photo.id, fileId: photo.fileId, etag: photo.etag,
+            pixels: pixels, store: environment.thumbnailStore, client: client
+        )
+    }
+
+    /// On unlock, proactively drop that higher-resolution copy (memory + disk) so it
+    /// doesn't linger. Leaves the shared grid thumbnail alone when the lock reused it.
+    private func evictLockedThumbnail(for photo: PhotoItem, lock: ZoomLock) {
+        let pixels = lock.thumbnailPixels
+        guard pixels != NextcloudConfig.gridThumbnailPixels else { return }
+        ImageLoader.shared.evict(ocId: photo.id, etag: photo.etag, pixels: pixels)
+        let store = environment.thumbnailStore
+        Task { await store.remove(ocId: photo.id, etag: photo.etag, pixels: pixels) }
     }
 
     // MARK: - Chrome

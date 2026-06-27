@@ -34,6 +34,13 @@ nonisolated enum NextcloudConfig {
     /// Larger preview shown first in the full-screen viewer before the full file.
     static let viewerPreviewPixels = 1024
 
+    /// Resolution ladder for a zoom-locked photo's cropped grid tile. The more a lock
+    /// zooms in, the higher up the ladder we cache so the crop stays sharp instead of an
+    /// upscaled grid thumbnail. `gridThumbnailPixels` is the floor — a barely-zoomed lock
+    /// reuses the normal grid thumbnail rather than fetching a bigger copy. See
+    /// ``ZoomLock/thumbnailPixels``.
+    static let lockedThumbnailPixelLadder = [gridThumbnailPixels, 768, 1024, 1536, 2048]
+
     /// How many of a folder's own photos the trailing thumbnail crawler prefetches
     /// at grid size ahead of viewing. The rest load on demand as the user scrolls,
     /// so this stays bounded for huge folders.

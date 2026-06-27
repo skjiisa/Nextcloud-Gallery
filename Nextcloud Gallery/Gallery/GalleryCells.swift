@@ -74,9 +74,11 @@ final class PhotoGridCell: UICollectionViewCell {
         tileAspect = lock?.tileAspect(imageAspect: item.aspectRatio) ?? item.aspectRatio
         thumbnail.crop = lock?.crop
         applyAppearance(fill: fill, cornerRadius: cornerRadius)
+        // A locked tile loads a higher-res copy sized to its crop, so the zoomed-in
+        // region stays sharp rather than upscaling the grid thumbnail.
         thumbnail.load(
             ocId: item.ocId, fileId: item.fileId, etag: item.etag,
-            pixels: NextcloudConfig.gridThumbnailPixels, store: store, client: client
+            pixels: lock?.thumbnailPixels ?? NextcloudConfig.gridThumbnailPixels, store: store, client: client
         )
     }
 

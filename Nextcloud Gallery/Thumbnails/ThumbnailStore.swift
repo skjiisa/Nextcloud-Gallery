@@ -120,6 +120,15 @@ actor ThumbnailStore {
         return location.exists(url) ? url : nil
     }
 
+    /// Deletes one cached thumbnail from disk — e.g. a zoom lock's higher-res copy when
+    /// the lock is cleared. Cancels an in-flight download for it first so it can't be
+    /// re-written after deletion.
+    func remove(ocId: String, etag: String, pixels: Int) {
+        let key = ThumbKey(ocId: ocId, etag: etag, pixels: pixels)
+        inFlight.removeValue(forKey: key.id)?.task.cancel()
+        location.remove(location.fileURL(for: key))
+    }
+
     /// Evicts oldest thumbnails to keep the cache under a size budget.
     func reap(maxBytes: Int) {
         DiskCacheReaper.reap(directory: location.directory, maxBytes: maxBytes)

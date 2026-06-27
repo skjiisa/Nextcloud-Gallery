@@ -27,6 +27,18 @@ struct ZoomLock: Codable, Equatable {
         guard let crop, crop.width > 0, crop.height > 0 else { return imageAspect }
         return imageAspect * (crop.width / crop.height)
     }
+
+    /// The cache resolution for this lock's cropped tile: scale the base grid size up by
+    /// how far the lock zooms in (the crop's smaller normalized side), then snap to the
+    /// next rung of ``NextcloudConfig/lockedThumbnailPixelLadder``. Deterministic from
+    /// `crop`, so warming a saved lock and evicting a cleared one address the same file.
+    /// Returns the grid size (the floor) when unlocked or barely zoomed.
+    var thumbnailPixels: Int {
+        guard let crop, crop.width > 0, crop.height > 0 else { return NextcloudConfig.gridThumbnailPixels }
+        let target = CGFloat(NextcloudConfig.gridThumbnailPixels) / min(crop.width, crop.height)
+        let ladder = NextcloudConfig.lockedThumbnailPixelLadder
+        return ladder.first { CGFloat($0) >= target } ?? ladder.last ?? NextcloudConfig.gridThumbnailPixels
+    }
 }
 
 extension UIImage {

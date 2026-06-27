@@ -89,6 +89,14 @@ final class ImageLoader {
         prefetchTasks.removeValue(forKey: key.id)?.cancel()
     }
 
+    /// Drops one cached decoded thumbnail and cancels any in-flight prefetch for it.
+    /// Used when a zoom lock is cleared so its higher-res copy doesn't linger in memory.
+    func evict(ocId: String, etag: String, pixels: Int) {
+        let key = ThumbKey(ocId: ocId, etag: etag, pixels: pixels)
+        prefetchTasks.removeValue(forKey: key.id)?.cancel()
+        cache.removeObject(forKey: key.id as NSString)
+    }
+
     /// Drops all in-memory decoded thumbnails (e.g. after a cache wipe).
     func clearMemory() {
         for task in prefetchTasks.values { task.cancel() }
