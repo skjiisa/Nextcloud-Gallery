@@ -142,6 +142,11 @@ final class PhotoViewerController: UIViewController {
     private let folderPullThreshold: CGFloat = 120
     /// How much of the finger's travel the content follows below the threshold.
     private let folderPullResistance: CGFloat = 0.35
+    /// Gap between photos when paging within a folder (the pager's inter-page spacing).
+    static let photoPageGap: CGFloat = 24
+    /// The wider gap between the last photo of one folder and the first of the
+    /// next, so crossing a folder boundary reads as more than a page turn.
+    private let folderPageGap: CGFloat = 64
 
     init(photos: [PhotoItem], initialID: String, environment: AppEnvironment, tabs: TabsModel) {
         self.photos = photos
@@ -189,7 +194,7 @@ final class PhotoViewerController: UIViewController {
     }
 
     private func setUpPageController() {
-        pageController = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal, options: [.interPageSpacing: 0])
+        pageController = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal, options: [.interPageSpacing: Self.photoPageGap])
         pageController.dataSource = self
         pageController.delegate = self
         addChild(pageController)
@@ -780,7 +785,8 @@ final class PhotoViewerController: UIViewController {
         guard let client = environment.client,
               let photo = folderPullForward ? neighbor.photos.first : neighbor.photos.last else { return }
 
-        let container = UIView(frame: view.bounds.offsetBy(dx: folderPullForward ? view.bounds.width : -view.bounds.width, dy: 0))
+        let distance = view.bounds.width + folderPageGap
+        let container = UIView(frame: view.bounds.offsetBy(dx: folderPullForward ? distance : -distance, dy: 0))
         let lock = environment.zoomLockStore.lock(for: photo.id)
         var aspect = photo.aspectRatio
         if let crop = lock?.crop, crop.height > 0 { aspect = aspect * crop.width / crop.height }
@@ -840,7 +846,9 @@ final class PhotoViewerController: UIViewController {
             return
         }
         let forward = folderPullForward
-        let width = view.bounds.width
+        // The incoming folder sits a full screen plus the folder gap away, so the
+        // two folders' photos never abut the way in-folder pages do.
+        let width = view.bounds.width + folderPageGap
         let pageLayer = pageController.view.layer
 
         // Hand the outgoing page off WITHOUT freezing it: the snapshot takes over
