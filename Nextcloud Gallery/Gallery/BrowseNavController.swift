@@ -233,6 +233,14 @@ final class BrowseNavController: UIViewController {
         viewer.onCurrentPhotoChanged = { [weak self] photo in
             self?.browseTab.viewerTitle = photo?.fileName
         }
+        // Cross-folder carousel: pulling past either end of the photos continues
+        // into the neighboring sibling folder.
+        viewer.neighborResolver = { [weak self] forward in
+            await self?.resolveNeighborFolder(forward: forward)
+        }
+        viewer.onFolderNavigated = { [weak self] neighbor, currentID in
+            self?.applyFolderNavigation(neighbor, currentID: currentID) ?? nil
+        }
         addChild(viewer)
         viewer.view.frame = view.bounds
         viewer.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -401,6 +409,99 @@ final class BrowseNavController: UIViewController {
             self?.isSwappingPresentation = false
             self?.updateBarState()
         }
+    }
+
+    // MARK: - Folder edge navigation (viewer)
+
+    /// The sibling folder next to the tab's current folder level, for the viewer's
+    /// end-of-carousel pull. Walks the parent's subfolders in grid order (skipping
+    /// ones with no photos to show) and packages the first hit's photos — in the
+    /// same presentation the current level uses — plus the route to adopt on commit.
+    /// Nil when the viewer isn't on a folder level, there is no such sibling, or
+    /// the favorites filter is on (its photo set needs a server fetch).
+    private func resolveNeighborFolder(forward: Bool) async -> ViewerFolderNeighbor? {
+        guard let route = browseTab.path.last, route.kind == .folder,
+              !browseTab.filter.contains(.favorites) else { return nil }
+        let path = WebDAVPath.normalized(route.path)
+        let root = WebDAVPath.normalized(client.filesRootPath)
+        // The parent must still be within the account's files tree; the root has
+        // no browsable siblings.
+        guard path != root, path.hasPrefix(root + "/"),
+              let slash = path.range(of: "/", options: .backwards) else { return nil }
+        let parent = String(path[..<slash.lowerBound])
+
+        let store = environment.cacheStore
+        guard let children = try? await store.folderItems(parentPath: parent, account: route.account) else { return nil }
+        let siblings = children.filter(\.isDirectory)
+        guard let index = siblings.firstIndex(where: { WebDAVPath.normalized($0.fullPath) == path }) else { return nil }
+
+        let step = forward ? 1 : -1
+        var candidate = index + step
+        while siblings.indices.contains(candidate) {
+            let folder = siblings[candidate]
+            if let photos = try? await neighborPhotos(inFolder: folder.fullPath, mode: route.mode, account: route.account),
+               !photos.isEmpty {
+                let newRoute = BrowseRoute.folder(
+                    path: WebDAVPath.normalized(folder.fullPath), title: folder.fileName,
+                    account: route.account, mode: route.mode
+                )
+                return ViewerFolderNeighbor(title: folder.fileName, photos: photos, route: newRoute, coverTiles: folder.coverTiles)
+            }
+            candidate += step
+        }
+        return nil
+    }
+
+    /// A neighbor folder's photos as the viewer would page them, matching the
+    /// current level's presentation: a browse grid pages the folder's direct photos
+    /// in grid order; a flat gallery pages the whole subtree in the tab's sort. The
+    /// zoom-locked filter applies (it's a local lookup, unlike favorites).
+    private func neighborPhotos(inFolder folderPath: String, mode: BrowseRoute.Mode, account: String) async throws -> [PhotoItem] {
+        let store = environment.cacheStore
+        var snapshots: [GridItemSnapshot]
+        switch mode {
+        case .browse:
+            snapshots = try await store.folderItems(parentPath: folderPath, account: account).filter { !$0.isDirectory }
+        case .flat:
+            snapshots = try await store.flatItems(under: folderPath, account: account, sort: browseTab.sort)
+        }
+        if browseTab.filter.contains(.zoomLocked) {
+            let lockStore = environment.zoomLockStore
+            snapshots = snapshots.filter { lockStore.isLocked($0.ocId) }
+        }
+        return snapshots.map(PhotoItem.init(snapshot:))
+    }
+
+    /// A folder pull committed: retarget the tab at the neighbor folder so the world
+    /// under the viewer matches — replace the top route, swap the grid beneath (not
+    /// animated; it's covered), point the close transition at it, and record the new
+    /// presentation. The viewer already adopted the new id, so the presentation sync
+    /// (`syncPhotoViewer`) recognizes it and doesn't re-embed. Returns the folder
+    /// just departed, packaged as a neighbor, so the viewer can offer an instant
+    /// pull straight back.
+    private func applyFolderNavigation(_ neighbor: ViewerFolderNeighbor, currentID: String) -> ViewerFolderNeighbor? {
+        guard photoViewer != nil, let oldRoute = browseTab.path.last else { return nil }
+        let departing: ViewerFolderNeighbor? = {
+            guard oldRoute.kind == .folder, let oldPhotos = browseTab.viewer?.photos, !oldPhotos.isEmpty else { return nil }
+            // Covers aren't at hand synchronously; the async re-resolution replaces
+            // this seed (placeholder icon) with the real 2x2 cover moments later.
+            return ViewerFolderNeighbor(title: oldRoute.title, photos: oldPhotos, route: oldRoute, coverTiles: [])
+        }()
+        browseTab.path[browseTab.path.count - 1] = neighbor.route
+
+        var stack = navController.viewControllers
+        let newTop = makeViewController(for: neighbor.route)
+        stack[stack.count - 1] = newTop
+        navController.setViewControllers(stack, animated: false)
+        updateBarState()
+
+        let source = newTop as? (any PhotoViewerTransitionSource)
+        browseTab.viewerSource = source
+        photoViewer?.source = source
+
+        browseTab.viewer = ViewerPresentation(photos: neighbor.photos, initialID: currentID)
+        tabsModel.save()
+        return departing
     }
 
     /// Whether the cached structure says a folder has no subfolders (so it should

@@ -12,13 +12,20 @@
 //  open photo lives on ``BrowseTab/viewer`` so it survives switching tabs (see
 //  ``RootCarouselViewController``).
 //
+//  Pulling past either end of the carousel continues into the neighbouring sibling
+//  folder (resistance → threshold → commit; see ``handleFolderPan(_:)`` and
+//  ``FolderEdgeNavigation``).
+//
 
 import UIKit
 
 final class PhotoViewerController: UIViewController {
     /// Identifies which presentation this viewer is showing (matches
     /// ``ViewerPresentation/id``), so the carousel can tell when to re-present.
-    let viewerID: String
+    /// Updated in place when a folder pull swaps the photo set (see
+    /// ``replacePhotos(_:startingAt:direction:)``) so the host's presentation
+    /// sync doesn't tear the viewer down mid-animation.
+    private(set) var viewerID: String
 
     /// Called after the close / swipe-away animation finishes, so the host (the tab's
     /// nav controller) removes this child viewer and clears ``BrowseTab/viewer``.
@@ -36,7 +43,7 @@ final class PhotoViewerController: UIViewController {
     /// open (set by the host). Weak — the carousel outlives us.
     weak var dragHandler: CarouselDragHandling?
 
-    private let photos: [PhotoItem]
+    private var photos: [PhotoItem]
     private let environment: AppEnvironment
     private let tabs: TabsModel
     private let saver = PhotoSaver()
@@ -96,6 +103,41 @@ final class PhotoViewerController: UIViewController {
     private var swipeStartFrame: CGRect = .zero
     private var swipePhotoID = ""
 
+    // MARK: Folder edge navigation state
+
+    /// Resolves the sibling folder the carousel can continue into (`forward` =
+    /// past the last photo). Set by the host; nil (or a nil result) means the
+    /// edge pull never engages. Re-queried after every folder jump.
+    var neighborResolver: ((_ forward: Bool) async -> ViewerFolderNeighbor?)?
+    /// Fired when a folder pull commits, with the adopted neighbor and the id of
+    /// the photo now showing — the host updates the tab's route, the grid beneath,
+    /// and the stored presentation (whose id already matches ``viewerID``). Returns
+    /// the folder just departed packaged as a neighbor, so an immediate pull back
+    /// works before the async re-resolution lands.
+    var onFolderNavigated: ((ViewerFolderNeighbor, _ currentID: String) -> ViewerFolderNeighbor?)?
+
+    private var folderPan: UIPanGestureRecognizer!
+    /// The pre-resolved neighbors for the current folder (nil = no folder that way).
+    private var nextNeighbor: ViewerFolderNeighbor?
+    private var prevNeighbor: ViewerFolderNeighbor?
+    private var neighborTask: Task<Void, Never>?
+    /// True while the active pull heads toward the *next* folder (leftward drag).
+    private var folderPullForward = true
+    /// Whether a pull actually engaged at `.began` (had a neighbor to pull toward).
+    private var folderPullActive = false
+    private var folderPullPastThreshold = false
+    private var folderHint: FolderEdgeHintView?
+    /// The neighbor's entry photo, parked one screen-width off the pulled edge and
+    /// riding the pull transform so the next image is visible coming in.
+    private var incomingPreview: UIView?
+    /// The frozen outgoing page while a commit settles, kept so a new pull can
+    /// interrupt the settle and clear it.
+    private var outgoingSnapshot: UIView?
+    /// Pull distance at which the resistance releases and letting go commits.
+    private let folderPullThreshold: CGFloat = 120
+    /// How much of the finger's travel the content follows below the threshold.
+    private let folderPullResistance: CGFloat = 0.35
+
     init(photos: [PhotoItem], initialID: String, environment: AppEnvironment, tabs: TabsModel) {
         self.photos = photos
         self.environment = environment
@@ -129,6 +171,7 @@ final class PhotoViewerController: UIViewController {
             self.presentSaveErrorIfNeeded()
         }
         barObservation = observeChanges { [weak self] in self?.configureTabBar() }
+        resolveNeighbors()
     }
 
     // MARK: - Setup
@@ -213,6 +256,8 @@ final class PhotoViewerController: UIViewController {
         )
         filmstrip.translatesAutoresizingMaskIntoConstraints = false
         filmstrip.onIndexChanged = { [weak self] index in self?.goToPage(index, fromFilmstrip: true) }
+        filmstrip.onFolderTapped = { [weak self] forward in self?.navigateToFolder(forward: forward) }
+        updateFilmstripNeighbors()
         // No backdrop behind the strip — it sits directly over the photo so a tall
         // portrait shows through beneath it. Kept below the tab bar in z-order.
         view.insertSubview(filmstrip, belowSubview: tabBar)
@@ -233,6 +278,10 @@ final class PhotoViewerController: UIViewController {
         dismissPan = UIPanGestureRecognizer(target: self, action: #selector(handleDismissPan(_:)))
         dismissPan.delegate = self
         view.addGestureRecognizer(dismissPan)
+
+        folderPan = UIPanGestureRecognizer(target: self, action: #selector(handleFolderPan(_:)))
+        folderPan.delegate = self
+        view.addGestureRecognizer(folderPan)
     }
 
     // MARK: - Pages
@@ -561,6 +610,312 @@ final class PhotoViewerController: UIViewController {
         }
     }
 
+    // MARK: - Folder edge navigation
+
+    /// Pre-resolves the sibling folders on both sides of the current one, so the
+    /// edge pull knows instantly whether it can engage (and what to call the
+    /// destination). Called on open and after every committed folder jump.
+    private func resolveNeighbors() {
+        neighborTask?.cancel()
+        // Deliberately leaves any current values (e.g. the just-departed folder
+        // seeded by a commit) in place until the fresh resolution overwrites them,
+        // so a quick pull straight back never finds a nil neighbor.
+        guard let neighborResolver else { return }
+        neighborTask = Task { [weak self] in
+            let next = await neighborResolver(true)
+            let prev = await neighborResolver(false)
+            guard let self, !Task.isCancelled else { return }
+            self.nextNeighbor = next
+            self.prevNeighbor = prev
+            self.prefetchNeighborEdges()
+            self.updateFilmstripNeighbors()
+        }
+    }
+
+    /// Mirrors the resolved neighbors into the filmstrip's end-of-strip folder
+    /// tiles (the file-browser-style square covers).
+    private func updateFilmstripNeighbors() {
+        filmstrip?.setNeighborFolders(
+            previous: prevNeighbor.map { PhotoFilmstripView.FolderPreview(title: $0.title, coverTiles: $0.coverTiles) },
+            next: nextNeighbor.map { PhotoFilmstripView.FolderPreview(title: $0.title, coverTiles: $0.coverTiles) }
+        )
+    }
+
+    /// Jumps into the neighbor folder without a pull — the filmstrip's folder tile
+    /// was tapped. Reuses the commit path (slide out / slide in) from rest.
+    private func navigateToFolder(forward: Bool) {
+        guard !folderPullActive else { return }
+        folderPullForward = forward
+        interruptFolderTransition()
+        commitFolderNavigation()
+    }
+
+    /// Warms each neighbor's entry photo — the fast grid thumbnail plus the
+    /// larger viewer preview — so the pull's incoming image and the page it lands
+    /// on are already sharp.
+    private func prefetchNeighborEdges() {
+        guard let client = environment.client else { return }
+        let edges = [nextNeighbor?.photos.first, prevNeighbor?.photos.last].compactMap { $0 }
+        for photo in edges {
+            for pixels in [NextcloudConfig.gridThumbnailPixels, NextcloudConfig.viewerPreviewPixels] {
+                ImageLoader.shared.prefetch(
+                    ocId: photo.id, fileId: photo.fileId, etag: photo.etag,
+                    pixels: pixels, store: environment.thumbnailStore, client: client
+                )
+            }
+        }
+    }
+
+    /// The horizontal pull past the carousel's ends. Below ``folderPullThreshold``
+    /// the content follows the finger with rubber-band resistance; crossing the
+    /// threshold fires a haptic and the resistance releases (1:1 tracking), and
+    /// letting go beyond it commits the jump into the neighboring folder.
+    @objc private func handleFolderPan(_ pan: UIPanGestureRecognizer) {
+        switch pan.state {
+        case .began:
+            folderPullForward = pan.velocity(in: view).x < 0
+            guard let neighbor = folderPullForward ? nextNeighbor : prevNeighbor else { return }
+            folderPullActive = true
+            // Freeze the pager (it may have started a bounce) — the pull owns the axis.
+            pagingScrollView?.isScrollEnabled = false
+            pan.setTranslation(.zero, in: view)
+            folderPullPastThreshold = false
+            dismissHaptic.prepare()
+            // A pull can start while a previous commit/cancel is still settling —
+            // freeze that settle where it is and take over from there.
+            interruptFolderTransition()
+            showFolderHint(for: neighbor)
+            showIncomingPreview(for: neighbor)
+
+        case .changed:
+            guard folderPullActive else { return }
+            updateFolderPull(distance: pullDistance(pan))
+
+        case .ended:
+            guard folderPullActive else { return }
+            folderPullActive = false
+            pagingScrollView?.isScrollEnabled = true
+            if pullDistance(pan) >= folderPullThreshold {
+                commitFolderNavigation()
+            } else {
+                cancelFolderPull()
+            }
+
+        case .cancelled, .failed:
+            guard folderPullActive else { return }
+            folderPullActive = false
+            pagingScrollView?.isScrollEnabled = true
+            cancelFolderPull()
+
+        default:
+            break
+        }
+    }
+
+    /// The pull's travel in its own direction (only outward movement counts).
+    private func pullDistance(_ pan: UIPanGestureRecognizer) -> CGFloat {
+        let x = pan.translation(in: view).x
+        return max(0, folderPullForward ? -x : x)
+    }
+
+    /// Finger travel → content offset: resistance below the threshold, the *full*
+    /// finger distance above it — as if the resistance had never applied. The
+    /// position jump at the crossing is deliberate; the tracking spring in
+    /// ``updateFolderPull(distance:)`` carries the content out to it.
+    private func folderPullOffset(for distance: CGFloat) -> CGFloat {
+        distance <= folderPullThreshold ? distance * folderPullResistance : distance
+    }
+
+    private func updateFolderPull(distance: CGFloat) {
+        let offset = min(folderPullOffset(for: distance), view.bounds.width)
+        let transform = CGAffineTransform(translationX: (folderPullForward ? -1 : 1) * offset, y: 0)
+
+        // Every move retargets a short additive spring rather than setting the
+        // transform outright: below the threshold it hugs the finger, at the
+        // crossing it springs the content out to the released (1:1) position, and
+        // it soaks up an interrupted settle's starting offset without a jump.
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            self.pageController.view.transform = transform
+            self.incomingPreview?.transform = transform
+        }
+
+        let past = distance >= folderPullThreshold
+        if past != folderPullPastThreshold {
+            folderPullPastThreshold = past
+            folderHint?.setEngaged(past)
+            if past { dismissHaptic.impactOccurred() } else { selectionHaptic.selectionChanged() }
+        }
+        folderHint?.setProgress(distance / folderPullThreshold)
+    }
+
+    /// Freezes any in-flight folder-pull settle (commit or cancel) at its current
+    /// on-screen position and clears the previous transition's leftovers, so a new
+    /// pull — or a quick chain of them — takes over seamlessly.
+    private func interruptFolderTransition() {
+        if let presentation = pageController.view.layer.presentation() {
+            let liveTx = presentation.affineTransform().tx
+            pageController.view.layer.removeAllAnimations()
+            pageController.view.transform = CGAffineTransform(translationX: liveTx, y: 0)
+        }
+        outgoingSnapshot?.removeFromSuperview()
+        outgoingSnapshot = nil
+        incomingPreview?.removeFromSuperview()
+        incomingPreview = nil
+        folderHint?.removeFromSuperview()
+        folderHint = nil
+    }
+
+    /// Parks a stand-in for the neighbor's entry photo one screen-width off the
+    /// pulled edge, so the pull reveals the actual next image (already prefetched —
+    /// see ``prefetchNeighborEdges``) and the commit slides it, not a blank page,
+    /// into place. A zoom-locked photo shows its locked crop, matching how its
+    /// page will open.
+    private func showIncomingPreview(for neighbor: ViewerFolderNeighbor) {
+        guard let client = environment.client,
+              let photo = folderPullForward ? neighbor.photos.first : neighbor.photos.last else { return }
+
+        let container = UIView(frame: view.bounds.offsetBy(dx: folderPullForward ? view.bounds.width : -view.bounds.width, dy: 0))
+        let lock = environment.zoomLockStore.lock(for: photo.id)
+        var aspect = photo.aspectRatio
+        if let crop = lock?.crop, crop.height > 0 { aspect = aspect * crop.width / crop.height }
+        let thumb = ThumbnailImageView(frame: fittedRect(forAspectRatio: aspect))
+        thumb.imageContentMode = .scaleAspectFit
+        thumb.crop = lock?.crop
+        thumb.load(
+            ocId: photo.ocId, fileId: photo.fileId, etag: photo.etag,
+            pixels: NextcloudConfig.viewerPreviewPixels, store: environment.thumbnailStore, client: client
+        )
+        container.addSubview(thumb)
+        view.insertSubview(container, aboveSubview: pageController.view)
+        incomingPreview = container
+    }
+
+    /// Shows the destination pill just off the pulled edge, vertically centered.
+    private func showFolderHint(for neighbor: ViewerFolderNeighbor) {
+        folderHint?.removeFromSuperview()
+        let hint = FolderEdgeHintView(title: neighbor.title, forward: folderPullForward)
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        view.insertSubview(hint, belowSubview: topBar)
+        let edge = folderPullForward
+            ? hint.leadingAnchor.constraint(equalTo: view.trailingAnchor)
+            : hint.trailingAnchor.constraint(equalTo: view.leadingAnchor)
+        NSLayoutConstraint.activate([edge, hint.centerYAnchor.constraint(equalTo: view.centerYAnchor)])
+        view.layoutIfNeeded()   // so setProgress sees the pill's real width
+        folderHint = hint
+    }
+
+    private func cancelFolderPull() {
+        // Keep the references while the settle runs, so a new pull can interrupt
+        // it (``interruptFolderTransition``); the identity checks below stop this
+        // completion from tearing down that new pull's views.
+        let hint = folderHint
+        let preview = incomingPreview
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.3, options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
+            self.pageController.view.transform = .identity
+            preview?.transform = .identity   // its frame is parked off-edge, so this hides it
+            hint?.setProgress(0)
+        } completion: { _ in
+            hint?.removeFromSuperview()
+            preview?.removeFromSuperview()
+            if self.folderHint === hint { self.folderHint = nil }
+            if self.incomingPreview === preview { self.incomingPreview = nil }
+        }
+    }
+
+    /// Slides the current page off, brings the neighbor's entry photo in from the
+    /// pulled edge, and swaps the viewer's world (photos, filmstrip, title) to the
+    /// new folder. The host is told last, so the tab's route/grid/presentation
+    /// follow (see ``onFolderNavigated``).
+    private func commitFolderNavigation() {
+        guard let neighbor = folderPullForward ? nextNeighbor : prevNeighbor else {
+            cancelFolderPull()
+            return
+        }
+        let forward = folderPullForward
+        let width = view.bounds.width
+        // The tracking spring may still be catching up — hand off from where the
+        // content visually is, not where the model says it should be.
+        let liveTx = pageController.view.layer.presentation()?.affineTransform().tx ?? pageController.view.transform.tx
+        pageController.view.layer.removeAllAnimations()
+
+        // Freeze the outgoing page as a snapshot so the pager can be repointed
+        // at the new folder underneath it.
+        let snapshot = pageController.view.snapshotView(afterScreenUpdates: false)
+        if let snapshot {
+            snapshot.frame = view.bounds
+            snapshot.transform = CGAffineTransform(translationX: liveTx, y: 0)
+            view.insertSubview(snapshot, aboveSubview: pageController.view)
+        }
+        outgoingSnapshot = snapshot
+
+        // Entering forward starts at the new folder's first photo; backward at its last.
+        let startIndex = forward ? 0 : neighbor.photos.count - 1
+        replacePhotos(neighbor.photos, startingAt: startIndex, direction: forward ? .forward : .reverse)
+
+        // The incoming content starts adjacent to the outgoing page's outer edge —
+        // exactly under the preview, which keeps covering it while it loads.
+        pageController.view.transform = CGAffineTransform(translationX: (forward ? width : -width) + liveTx, y: 0)
+        incomingPreview?.layer.removeAllAnimations()
+        incomingPreview?.transform = CGAffineTransform(translationX: liveTx, y: 0)
+
+        let hint = folderHint
+        let preview = incomingPreview
+        let settled = CGAffineTransform(translationX: forward ? -width : width, y: 0)
+        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0.5, options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
+            snapshot?.transform = settled
+            preview?.transform = settled   // parked one width off, so this is on-screen
+            self.pageController.view.transform = .identity
+            hint?.alpha = 0
+        } completion: { _ in
+            snapshot?.removeFromSuperview()
+            hint?.removeFromSuperview()
+            preview?.removeFromSuperview()
+            if self.outgoingSnapshot === snapshot { self.outgoingSnapshot = nil }
+            if self.folderHint === hint { self.folderHint = nil }
+            if self.incomingPreview === preview { self.incomingPreview = nil }
+        }
+        selectionHaptic.selectionChanged()
+
+        // Seed the direction we came from so an immediate pull straight back works;
+        // the async re-resolution then fills in (or corrects) both sides.
+        let departing = onFolderNavigated?(neighbor, currentPhotoID)
+        if forward {
+            prevNeighbor = departing
+            nextNeighbor = nil
+        } else {
+            nextNeighbor = departing
+            prevNeighbor = nil
+        }
+        updateFilmstripNeighbors()
+        resolveNeighbors()
+    }
+
+    /// Swaps the carousel to a new photo set, showing `index`: repoints the pager,
+    /// rebuilds the filmstrip, and adopts the shown photo's id as ``viewerID`` so
+    /// the host's presentation sync recognizes the swap as this same viewer.
+    private func replacePhotos(_ newPhotos: [PhotoItem], startingAt index: Int, direction: UIPageViewController.NavigationDirection) {
+        guard !newPhotos.isEmpty else { return }
+        photos = newPhotos
+        currentIndex = max(0, min(index, newPhotos.count - 1))
+        viewerID = newPhotos[currentIndex].id
+        guard let page = makePage(at: currentIndex) else { return }
+        pageController.setViewControllers([page], direction: direction, animated: false)
+        pageController.view.layoutIfNeeded()   // settle before the slide-in animates
+        yieldChromeTap(to: page)
+        rebuildFilmstrip()
+        updateTitle()
+    }
+
+    /// The filmstrip is built around an immutable photo list, so a folder swap
+    /// replaces it wholesale, fading the new one in (unless the chrome is hidden).
+    private func rebuildFilmstrip() {
+        filmstrip.removeFromSuperview()
+        setUpFilmstrip()
+        guard !chromeHidden else { filmstrip.alpha = 0; return }
+        filmstrip.alpha = 0
+        UIView.animate(withDuration: 0.25) { self.filmstrip.alpha = 1 }
+    }
+
     // MARK: - Transition hooks
 
     /// Set by the open animator to receive the current page's sharper image stages
@@ -780,6 +1135,15 @@ extension PhotoViewerController: UIPageViewControllerDataSource, UIPageViewContr
 
 extension PhotoViewerController: UIGestureRecognizerDelegate {
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === folderPan {
+            // The folder pull engages only at the carousel's ends, pulling outward
+            // (horizontal-dominant), when a sibling folder is waiting on that side.
+            if currentPageVC?.isZoomed == true { return false }
+            let velocity = folderPan.velocity(in: view)
+            guard abs(velocity.x) > abs(velocity.y) else { return false }
+            if velocity.x < 0 { return currentIndex == photos.count - 1 && nextNeighbor != nil }
+            return currentIndex == 0 && prevNeighbor != nil
+        }
         guard gestureRecognizer === dismissPan else { return true }
         // Swipe-to-dismiss only when not zoomed, and only for a downward-dominant drag
         // (horizontal swipes belong to the pager; upward/zoomed drags pan the photo).
@@ -789,16 +1153,17 @@ extension PhotoViewerController: UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        // Let the dismiss pan coexist with the page/scroll view pans; the gating above
-        // keeps it from firing on horizontal swipes.
+        // Let the dismiss/folder pans coexist with the page/scroll view pans; the
+        // gating above keeps them off ordinary swipes (and off each other's axis).
         gestureRecognizer === dismissPan || other === dismissPan
+            || gestureRecognizer === folderPan || other === folderPan
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        // The chrome-toggle tap AND the swipe-dismiss ignore touches on the bars /
-        // filmstrip, so their own controls handle them — and crucially so dragging the
-        // tab bar drives only the carousel, not the viewer's swipe-dismiss.
-        guard gestureRecognizer === chromeTap || gestureRecognizer === dismissPan,
+        // The chrome-toggle tap AND the swipe-dismiss/folder pulls ignore touches on
+        // the bars / filmstrip, so their own controls handle them — and crucially so
+        // dragging the tab bar drives only the carousel, not the viewer's gestures.
+        guard gestureRecognizer === chromeTap || gestureRecognizer === dismissPan || gestureRecognizer === folderPan,
               let touched = touch.view else { return true }
         return !touched.isDescendant(of: topBar)
             && !touched.isDescendant(of: tabBar)
