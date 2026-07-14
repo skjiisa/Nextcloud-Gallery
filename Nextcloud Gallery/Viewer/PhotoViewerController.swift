@@ -125,6 +125,11 @@ final class PhotoViewerController: UIViewController {
     private var folderPullForward = true
     /// Whether a pull actually engaged at `.began` (had a neighbor to pull toward).
     private var folderPullActive = false
+    /// True while the pager is animating a page turn. ``currentIndex`` only
+    /// updates when that finishes, so during a quick swipe-back it still reads
+    /// the edge photo — without this gate, the folder pull would hijack what is
+    /// really a page turn back to it.
+    private var isPagerTransitioning = false
     private var folderPullPastThreshold = false
     private var folderHint: FolderEdgeHintView?
     /// The neighbor's entry photo, parked one screen-width off the pulled edge and
@@ -317,6 +322,7 @@ final class PhotoViewerController: UIViewController {
         guard photos.indices.contains(index), index != currentIndex, let page = makePage(at: index) else { return }
         let direction: UIPageViewController.NavigationDirection = index > currentIndex ? .forward : .reverse
         currentIndex = index
+        isPagerTransitioning = false   // programmatic repoint cancels any in-flight turn
         pageController.setViewControllers([page], direction: direction, animated: false)
         yieldChromeTap(to: page)
         updateTitle()
@@ -916,6 +922,7 @@ final class PhotoViewerController: UIViewController {
         currentIndex = max(0, min(index, newPhotos.count - 1))
         viewerID = newPhotos[currentIndex].id
         guard let page = makePage(at: currentIndex) else { return }
+        isPagerTransitioning = false   // programmatic repoint cancels any in-flight turn
         pageController.setViewControllers([page], direction: direction, animated: false)
         pageController.view.layoutIfNeeded()   // settle before the slide-in animates
         yieldChromeTap(to: page)
@@ -1138,7 +1145,13 @@ extension PhotoViewerController: UIPageViewControllerDataSource, UIPageViewContr
         return makePage(at: index + 1)
     }
 
+    func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
+        isPagerTransitioning = true
+    }
+
     func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
+        // Fires for cancelled turns too (completed == false) — always clear the flag.
+        isPagerTransitioning = false
         guard completed, let current = pageController.viewControllers?.first, let index = index(of: current) else { return }
         currentIndex = index
         yieldChromeTap(to: current as! PhotoPageViewController)
@@ -1154,7 +1167,10 @@ extension PhotoViewerController: UIGestureRecognizerDelegate {
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer === folderPan {
             // The folder pull engages only at the carousel's ends, pulling outward
-            // (horizontal-dominant), when a sibling folder is waiting on that side.
+            // (horizontal-dominant), when a sibling folder is waiting on that side —
+            // and never while a page turn is still settling (``currentIndex`` is
+            // stale until it finishes; the swipe belongs to the pager).
+            if isPagerTransitioning { return false }
             if currentPageVC?.isZoomed == true { return false }
             let velocity = folderPan.velocity(in: view)
             guard abs(velocity.x) > abs(velocity.y) else { return false }
