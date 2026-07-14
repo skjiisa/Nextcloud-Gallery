@@ -807,7 +807,9 @@ final class PhotoViewerController: UIViewController {
     private func cancelFolderPull() {
         // Keep the references while the settle runs, so a new pull can interrupt
         // it (``interruptFolderTransition``); the identity checks below stop this
-        // completion from tearing down that new pull's views.
+        // completion from tearing down that new pull's views. The retarget is
+        // additive on top of the still-running tracking springs, so the release
+        // momentum carries into the settle by itself.
         let hint = folderHint
         let preview = incomingPreview
         UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.3, options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
@@ -833,17 +835,24 @@ final class PhotoViewerController: UIViewController {
         }
         let forward = folderPullForward
         let width = view.bounds.width
-        // The tracking spring may still be catching up — hand off from where the
-        // content visually is, not where the model says it should be.
-        let liveTx = pageController.view.layer.presentation()?.affineTransform().tx ?? pageController.view.transform.tx
-        pageController.view.layer.removeAllAnimations()
+        let pageLayer = pageController.view.layer
 
-        // Freeze the outgoing page as a snapshot so the pager can be repointed
-        // at the new folder underneath it.
+        // Hand the outgoing page off WITHOUT freezing it: the snapshot takes over
+        // the page's model transform AND its in-flight tracking animations, so the
+        // render server never sees a discontinuity. (Freezing to a presentation()
+        // read here caused a one-frame backwards jump on flicks: this turn is
+        // heavy, and while it built the new page the springs kept animating ahead
+        // on screen — then the commit snapped everything back to the stale read.)
+        let modelTx = pageController.view.transform.tx
         let snapshot = pageController.view.snapshotView(afterScreenUpdates: false)
         if let snapshot {
             snapshot.frame = view.bounds
-            snapshot.transform = CGAffineTransform(translationX: liveTx, y: 0)
+            snapshot.transform = CGAffineTransform(translationX: modelTx, y: 0)
+            for key in pageLayer.animationKeys() ?? [] {
+                if let animation = pageLayer.animation(forKey: key) {
+                    snapshot.layer.add(animation, forKey: key)
+                }
+            }
             view.insertSubview(snapshot, aboveSubview: pageController.view)
         }
         outgoingSnapshot = snapshot
@@ -852,16 +861,18 @@ final class PhotoViewerController: UIViewController {
         let startIndex = forward ? 0 : neighbor.photos.count - 1
         replacePhotos(neighbor.photos, startingAt: startIndex, direction: forward ? .forward : .reverse)
 
-        // The incoming content starts adjacent to the outgoing page's outer edge —
-        // exactly under the preview, which keeps covering it while it loads.
-        pageController.view.transform = CGAffineTransform(translationX: (forward ? width : -width) + liveTx, y: 0)
-        incomingPreview?.layer.removeAllAnimations()
-        incomingPreview?.transform = CGAffineTransform(translationX: liveTx, y: 0)
+        // The incoming content starts adjacent to the outgoing page's outer edge.
+        // The pager keeps its animation stack (the deltas apply relative to any
+        // model), so it rides in exact lockstep with the snapshot; the preview
+        // already carries an identical stack of its own.
+        pageController.view.transform = CGAffineTransform(translationX: (forward ? width : -width) + modelTx, y: 0)
 
         let hint = folderHint
         let preview = incomingPreview
         let settled = CGAffineTransform(translationX: forward ? -width : width, y: 0)
-        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0.5, options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
+        // The retarget composes additively with the still-running tracking springs,
+        // so the release momentum carries through the hand-off on its own.
+        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0.5, options: [.curveEaseOut, .allowUserInteraction]) {
             snapshot?.transform = settled
             preview?.transform = settled   // parked one width off, so this is on-screen
             self.pageController.view.transform = .identity
@@ -876,18 +887,24 @@ final class PhotoViewerController: UIViewController {
         }
         selectionHaptic.selectionChanged()
 
-        // Seed the direction we came from so an immediate pull straight back works;
-        // the async re-resolution then fills in (or corrects) both sides.
-        let departing = onFolderNavigated?(neighbor, currentPhotoID)
-        if forward {
-            prevNeighbor = departing
-            nextNeighbor = nil
-        } else {
-            nextNeighbor = departing
-            prevNeighbor = nil
+        // The host-side swap (route, grid beneath, presentation) builds a whole
+        // view controller — defer it a turn so it doesn't fatten this transaction
+        // and delay the settle's first frame. Seeding the direction we came from
+        // (so an immediate pull straight back works) rides along; the async
+        // re-resolution then fills in (or corrects) both sides.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let departing = self.onFolderNavigated?(neighbor, self.currentPhotoID)
+            if forward {
+                self.prevNeighbor = departing
+                self.nextNeighbor = nil
+            } else {
+                self.nextNeighbor = departing
+                self.prevNeighbor = nil
+            }
+            self.updateFilmstripNeighbors()
+            self.resolveNeighbors()
         }
-        updateFilmstripNeighbors()
-        resolveNeighbors()
     }
 
     /// Swaps the carousel to a new photo set, showing `index`: repoints the pager,
