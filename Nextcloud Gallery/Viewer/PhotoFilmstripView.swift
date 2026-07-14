@@ -210,6 +210,27 @@ extension PhotoFilmstripView: UICollectionViewDataSource, UICollectionViewDelega
         onIndexChanged?(indexPath.item)
     }
 
+    /// Retargets a released scrub's natural landing point to the nearest item's
+    /// center, so the strip always settles with a thumbnail dead-center (the
+    /// selected one — `scrollViewDidScroll` keeps the selection in sync on the
+    /// way there). The rest-offset clamp still owns the ends, so a hard fling
+    /// settles on the first/last photo.
+    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        let targetCenter = targetContentOffset.pointee.x + scrollView.bounds.width / 2
+        var x: CGFloat = 0
+        var nearest: (index: Int, center: CGFloat)?
+        for index in photos.indices {
+            let width = itemWidth(at: index)
+            let center = x + width / 2
+            if nearest == nil || abs(center - targetCenter) < abs(nearest!.center - targetCenter) {
+                nearest = (index, center)
+            }
+            x += width + spacing
+        }
+        guard let nearest else { return }
+        targetContentOffset.pointee.x = nearest.center - scrollView.bounds.width / 2
+    }
+
     // Only react while the user is physically scrubbing — not to our own
     // `scrollToItem` centering (which leaves these tracking flags false).
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
