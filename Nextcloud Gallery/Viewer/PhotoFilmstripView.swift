@@ -10,13 +10,30 @@
 //  when the pager turns (a programmatic, non-firing centering), and the strip calls
 //  ``onIndexChanged`` only while the user is physically dragging it.
 //
+//  When sibling folders neighbor this one (see ``FolderEdgeNavigation``), a square
+//  folder tile — the file browser's 2x2 cover look — rides just past the strip's
+//  first/last photo, in the scroll view's overscroll region. It scrolls with the
+//  content, but the rest offsets are clamped to the end photos, so a bounce always
+//  settles on the last photo, never on a folder. Tapping a tile jumps the viewer
+//  into that folder.
+//
 
 import UIKit
 
 @MainActor
 final class PhotoFilmstripView: UIView {
+    /// A neighbor folder shown as a square cover tile in the strip's margin — the
+    /// same 2x2 composite artwork the file browser gives folders.
+    struct FolderPreview: Equatable {
+        let title: String
+        let coverTiles: [CoverTile]
+    }
+
     /// Fired when the user scrubs/taps to a new photo (never for programmatic syncs).
     var onIndexChanged: ((Int) -> Void)?
+
+    /// Fired when a margin folder tile is tapped (`true` = the next folder).
+    var onFolderTapped: ((_ forward: Bool) -> Void)?
 
     /// Preferred height for the whole strip (thumbnails + vertical padding).
     static let preferredHeight: CGFloat = 64
@@ -31,6 +48,13 @@ final class PhotoFilmstripView: UIView {
     private var pendingCenterIndex: Int?
     private var lastCenteringWidth: CGFloat = -1
 
+    /// The sibling folders bookending this one, riding beyond the strip's content
+    /// as square cover tiles. Arrive asynchronously once resolved.
+    private var prevFolder: FolderPreview?
+    private var nextFolder: FolderPreview?
+    private var prevTile: FilmstripFolderTile?
+    private var nextTile: FilmstripFolderTile?
+
     private lazy var collectionView: UICollectionView = {
         let layout = UICollectionViewFlowLayout()
         layout.scrollDirection = .horizontal
@@ -41,6 +65,7 @@ final class PhotoFilmstripView: UIView {
         cv.backgroundColor = .clear
         cv.showsHorizontalScrollIndicator = false
         cv.decelerationRate = .fast
+        cv.clipsToBounds = true
         cv.dataSource = self
         cv.delegate = self
         cv.register(FilmstripCell.self, forCellWithReuseIdentifier: FilmstripCell.reuseID)
@@ -68,18 +93,67 @@ final class PhotoFilmstripView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Inset by half the width so the first and last items can sit dead center.
-        let half = bounds.width / 2
-        if collectionView.contentInset.left != half {
-            collectionView.contentInset = UIEdgeInsets(top: 0, left: half, bottom: 0, right: half)
+        let width = bounds.width
+        guard width > 0 else { return }
+        // Insets sized so the *rest* offsets clamp to the first/last photo dead
+        // center (not the classic half-width, which would let the strip settle
+        // past them onto the folder tiles in the overscroll region).
+        let insets = UIEdgeInsets(
+            top: 0, left: width / 2 - itemWidth(at: 0) / 2,
+            bottom: 0, right: width / 2 - itemWidth(at: photos.count - 1) / 2
+        )
+        if collectionView.contentInset != insets {
+            collectionView.contentInset = insets
         }
+        layoutFolderTiles()
         // Re-center on first layout / width change (e.g. rotation).
-        if bounds.width > 0, bounds.width != lastCenteringWidth {
-            lastCenteringWidth = bounds.width
+        if width != lastCenteringWidth {
+            lastCenteringWidth = width
             collectionView.collectionViewLayout.invalidateLayout()
             centerItem(pendingCenterIndex ?? currentIndex, animated: false)
             pendingCenterIndex = nil
         }
+    }
+
+    /// Places the folder tiles just past the strip's content, in the scroll view's
+    /// content coordinates — they ride with the photos, but the rest-offset clamp
+    /// above means a bounce always returns to the end photo, never onto them.
+    private func layoutFolderTiles() {
+        let contentWidth = collectionView.collectionViewLayout.collectionViewContentSize.width
+        let y = (collectionView.bounds.height - itemHeight) / 2
+        prevTile?.frame = CGRect(x: -(itemHeight + spacing), y: y, width: itemHeight, height: itemHeight)
+        nextTile?.frame = CGRect(x: contentWidth + spacing, y: y, width: itemHeight, height: itemHeight)
+    }
+
+    /// Shows (or updates) the neighbor-folder tiles past the strip's ends.
+    func setNeighborFolders(previous: FolderPreview?, next: FolderPreview?) {
+        guard previous != prevFolder || next != nextFolder else { return }
+        prevFolder = previous
+        nextFolder = next
+        prevTile = updateTile(prevTile, preview: previous, forward: false)
+        nextTile = updateTile(nextTile, preview: next, forward: true)
+        setNeedsLayout()
+    }
+
+    /// Replaces (or removes) one folder tile, fading the new one in. Tiles are
+    /// subviews of the collection view so they pan with its content; their frames
+    /// are set in `layoutFolderTiles`.
+    private func updateTile(_ tile: FilmstripFolderTile?, preview: FolderPreview?, forward: Bool) -> FilmstripFolderTile? {
+        tile?.removeFromSuperview()
+        guard let preview, let client else { return nil }
+        let new = FilmstripFolderTile(preview: preview, store: store, client: client) { [weak self] in
+            self?.onFolderTapped?(forward)
+        }
+        collectionView.addSubview(new)
+        new.alpha = 0
+        UIView.animate(withDuration: 0.2) { new.alpha = 1 }
+        return new
+    }
+
+    /// The width `sizeForItemAt` gives the photo at `index` (square fallback).
+    private func itemWidth(at index: Int) -> CGFloat {
+        guard photos.indices.contains(index) else { return itemHeight }
+        return (itemHeight * photos[index].aspectRatio).clamped(to: itemHeight * 0.6 ... itemHeight * 1.8)
     }
 
     /// Centers + highlights `index` without firing `onIndexChanged`. Called by the
@@ -87,7 +161,7 @@ final class PhotoFilmstripView: UIView {
     func select(index: Int, animated: Bool) {
         guard photos.indices.contains(index) else { return }
         currentIndex = index
-        guard bounds.width > 0 else { pendingCenterIndex = index; return }
+        guard collectionView.bounds.width > 0 else { pendingCenterIndex = index; return }
         centerItem(index, animated: animated)
         refreshHighlight()
     }
@@ -127,15 +201,34 @@ extension PhotoFilmstripView: UICollectionViewDataSource, UICollectionViewDelega
     }
 
     func collectionView(_ collectionView: UICollectionView, layout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {
-        let aspect = photos[indexPath.item].aspectRatio
-        let width = (itemHeight * aspect).clamped(to: itemHeight * 0.6 ... itemHeight * 1.8)
-        return CGSize(width: width, height: itemHeight)
+        CGSize(width: itemWidth(at: indexPath.item), height: itemHeight)
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard indexPath.item != currentIndex else { return }
         select(index: indexPath.item, animated: true)
         onIndexChanged?(indexPath.item)
+    }
+
+    /// Retargets a released scrub's natural landing point to the nearest item's
+    /// center, so the strip always settles with a thumbnail dead-center (the
+    /// selected one — `scrollViewDidScroll` keeps the selection in sync on the
+    /// way there). The rest-offset clamp still owns the ends, so a hard fling
+    /// settles on the first/last photo.
+    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        let targetCenter = targetContentOffset.pointee.x + scrollView.bounds.width / 2
+        var x: CGFloat = 0
+        var nearest: (index: Int, center: CGFloat)?
+        for index in photos.indices {
+            let width = itemWidth(at: index)
+            let center = x + width / 2
+            if nearest == nil || abs(center - targetCenter) < abs(nearest!.center - targetCenter) {
+                nearest = (index, center)
+            }
+            x += width + spacing
+        }
+        guard let nearest else { return }
+        targetContentOffset.pointee.x = nearest.center - scrollView.bounds.width / 2
     }
 
     // Only react while the user is physically scrubbing — not to our own
@@ -149,7 +242,7 @@ extension PhotoFilmstripView: UICollectionViewDataSource, UICollectionViewDelega
     }
 }
 
-// MARK: - Cell
+// MARK: - Cells
 
 private final class FilmstripCell: UICollectionViewCell {
     static let reuseID = "FilmstripCell"
@@ -193,6 +286,43 @@ private final class FilmstripCell: UICollectionViewCell {
         super.prepareForReuse()
         thumbnail.prepareForReuse()
     }
+}
+
+/// A neighbor folder's square margin tile: the file browser's cover artwork
+/// (``FolderCoverView`` — placeholder icon, single cover, or 2x2 composite),
+/// tappable to jump into that folder.
+private final class FilmstripFolderTile: UIView {
+    private let cover = FolderCoverView()
+    private let onTap: () -> Void
+
+    init(preview: PhotoFilmstripView.FolderPreview, store: ThumbnailStore, client: NextcloudClient, onTap: @escaping () -> Void) {
+        self.onTap = onTap
+        super.init(frame: .zero)
+        cover.translatesAutoresizingMaskIntoConstraints = false
+        cover.layer.cornerRadius = 4
+        cover.layer.cornerCurve = .continuous
+        cover.clipsToBounds = true
+        addSubview(cover)
+        NSLayoutConstraint.activate([
+            cover.topAnchor.constraint(equalTo: topAnchor),
+            cover.bottomAnchor.constraint(equalTo: bottomAnchor),
+            cover.leadingAnchor.constraint(equalTo: leadingAnchor),
+            cover.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        cover.configure(
+            coverTiles: preview.coverTiles, placeholderSymbol: "folder.fill",
+            pixels: NextcloudConfig.coverTilePixels, store: store, client: client
+        )
+        isAccessibilityElement = true
+        accessibilityLabel = preview.title
+        accessibilityTraits = .button
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func tapped() { onTap() }
 }
 
 // MARK: - Util
