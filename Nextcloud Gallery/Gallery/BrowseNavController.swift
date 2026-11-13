@@ -50,6 +50,7 @@ final class BrowseNavController: UIViewController {
     private let bar = GlassTabBar()
     private var barObservation: ObservationToken?
     private var viewerObservation: ObservationToken?
+    private var albumObserver: NSObjectProtocol?
     private var photoViewer: PhotoViewerController?
     /// True while the Gallery toggle's cross-dissolve is in flight, to ignore repeat
     /// taps until it settles.
@@ -172,6 +173,12 @@ final class BrowseNavController: UIViewController {
         let stack = (0...browseTab.path.count).map { makeViewController(atDepth: $0) }
         navController.setViewControllers(stack, animated: false)
         navController.delegate = self
+
+        albumObserver = AlbumEditor.observe { [weak self] change in self?.handleAlbumChange(change) }
+    }
+
+    deinit {
+        if let albumObserver { NotificationCenter.default.removeObserver(albumObserver) }
     }
 
     @available(*, unavailable)
@@ -335,10 +342,12 @@ final class BrowseNavController: UIViewController {
                 try await client.favorites()
             }
         case .album:
-            let davPath = route.path
-            vc = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [client] in
-                try await client.albumPhotos(davPath: davPath)
+            let actions = AlbumGalleryActions(albumName: route.path, client: client)
+            let gallery = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [weak actions] in
+                try await actions?.fetch() ?? []
             }
+            gallery.actions = actions
+            vc = gallery
         case .tag:
             let tagId = route.path
             vc = RemoteGalleryViewController(title: route.title, account: route.account, environment: environment, client: client, tab: browseTab, navigator: self) { [client] in
@@ -400,6 +409,36 @@ final class BrowseNavController: UIViewController {
         } completion: { [weak self] _ in
             self?.isSwappingPresentation = false
             self?.updateBarState()
+        }
+    }
+
+    /// Keeps the stack in step with album edits made anywhere: a renamed album's
+    /// levels take the new name (so they restore and title correctly), and a deleted
+    /// album's level closes, along with anything opened above it.
+    private func handleAlbumChange(_ change: AlbumChange) {
+        switch change {
+        case .renamed(let from, let to):
+            var changed = false
+            for index in browseTab.path.indices where browseTab.path[index].kind == .album && browseTab.path[index].path == from {
+                browseTab.path[index] = .album(named: to, account: browseTab.path[index].account)
+                changed = true
+            }
+            guard changed else { return }
+            tabsModel.save()
+            updateBarState()
+        case .deleted(let album):
+            guard let index = browseTab.path.firstIndex(where: { $0.kind == .album && $0.path == album }) else { return }
+            browseTab.path = Array(browseTab.path.prefix(index))
+            tabsModel.save()
+            // Path entry `index` is stack depth `index + 1`, so the screen beneath it
+            // is at stack index `index`.
+            let stack = navController.viewControllers
+            if index < stack.count - 1 {
+                navController.popToViewController(stack[index], animated: view.window != nil)
+            }
+            updateBarState()
+        case .contentsChanged:
+            break
         }
     }
 

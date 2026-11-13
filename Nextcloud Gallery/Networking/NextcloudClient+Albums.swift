@@ -2,82 +2,118 @@
 //  NextcloudClient+Albums.swift
 //  Nextcloud Gallery
 //
-//  Reading Nextcloud Photos albums. NextcloudKit has no album API, so these talk to
-//  the raw `/remote.php/dav/photos/<user>/albums/` WebDAV tree directly (a basic-auth
-//  URLSession PROPFIND). That endpoint exposes each photo's file id but not its real
-//  path or ocId, so an album's photos are resolved back to real `NKFile`s with a
-//  files-tree WebDAV SEARCH on `oc:fileid` — making album photos first-class (true
-//  originals, shared thumbnail cache, working viewer/saver) like any other photo.
+//  Nextcloud Photos albums (and system-tag lookups that share the same fileId
+//  resolve). Album reads/writes go through NextcloudKit's album API (7.6+), which
+//  wraps the Photos app's `/remote.php/dav/photos/<user>/albums/` WebDAV tree.
+//
+//  That tree exposes each photo's file id but not its real path or ocId, so an
+//  album's photos are resolved back to real `NKFile`s with one batched files-tree
+//  WebDAV SEARCH on `oc:fileid` — making album photos first-class (true originals,
+//  shared thumbnail cache, working viewer/saver) like any other photo. (The official
+//  app instead resolves each uncached photo with its own request.)
 //
 
 import Foundation
 import NextcloudKit
 
+/// An album's photos plus the name each one has *inside* the album collection
+/// (`{fileId}-{fileName}` on the Photos backend), which is what removal targets.
+nonisolated struct AlbumContents: Sendable {
+    let photos: [GridItemSnapshot]
+    /// File id → the photo's entry name in the album collection.
+    let entryNames: [String: String]
+}
+
 extension NextcloudClient {
-    /// Root of the account's Photos albums tree.
-    private var photosAlbumsRoot: String {
-        WebDAVPath.normalized(credentials.urlBase) + "/remote.php/dav/photos/" + credentials.userId + "/albums/"
-    }
+    // MARK: - Albums
 
-    /// The `<d:href>` path of the albums collection itself, to skip its self entry in
-    /// the PROPFIND listing.
-    private var albumsRootHref: String {
-        let user = credentials.userId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? credentials.userId
-        return "/remote.php/dav/photos/\(user)/albums/"
-    }
-
-    // MARK: - Listing albums
-
-    /// Lists the account's Photos albums (one PROPFIND on the albums collection).
+    /// Lists the account's Photos albums.
     func listAlbums() async throws -> [Album] {
-        let body = """
-        <?xml version="1.0"?>
-        <d:propfind xmlns:d="DAV:" xmlns:nc="http://nextcloud.org/ns">
-          <d:prop>
-            <nc:last-photo/>
-            <nc:nbItems/>
-          </d:prop>
-        </d:propfind>
-        """
-        let data = try await davRequest(method: "PROPFIND", urlString: photosAlbumsRoot, depth: "1", body: body)
-        let urlBase = WebDAVPath.normalized(credentials.urlBase)
-        let selfHref = albumsRootHref
-
-        return WebDAVMultiStatus.parse(data).compactMap { entry -> Album? in
-            // Drop the albums collection's own entry; keep only child albums.
-            guard entry.href != selfHref else { return nil }
-            let name = Self.lastPathComponent(ofHref: entry.href)
-            guard !name.isEmpty else { return nil }
-            let cover = entry.props["last-photo"].flatMap { $0.isEmpty ? nil : $0 }
-            let count = entry.props["nbItems"].flatMap { Int($0) } ?? 0
-            return Album(name: name, davPath: urlBase + entry.href, photoCount: count, coverFileId: cover)
+        let account = credentials.account
+        let albums: [NKPhotoAlbum] = try await nkResult {
+            NextcloudKit.shared.fetchAllAlbums(for: account, completion: $0)
+        }
+        return albums.map {
+            Album(name: $0.name, photoCount: $0.itemCount ?? 0, coverFileId: $0.lastPhotoId.flatMap { $0.isEmpty ? nil : $0 })
         }
     }
-
-    // MARK: - Album contents
 
     /// The photos in an album, in album order, as cache-free snapshots with real
-    /// path/ocId/etag (resolved from the files tree). Two requests: one PROPFIND for
-    /// the album's file ids, one batched SEARCH to resolve them.
-    func albumPhotos(davPath: String) async throws -> [GridItemSnapshot] {
-        let body = """
-        <?xml version="1.0"?>
-        <d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
-          <d:prop><oc:fileid/></d:prop>
-        </d:propfind>
-        """
-        let data = try await davRequest(method: "PROPFIND", urlString: davPath, depth: "1", body: body)
-        // The album collection's own entry has no file id, so it drops out here.
-        let fileIds = WebDAVMultiStatus.parse(data).compactMap { entry -> String? in
-            guard let id = entry.props["fileid"], !id.isEmpty else { return nil }
-            return id
-        }
-        guard !fileIds.isEmpty else { return [] }
-
+    /// path/ocId/etag (resolved from the files tree), plus each photo's entry name in
+    /// the album. Two requests: the album PROPFIND, then one batched SEARCH.
+    func albumContents(named albumName: String) async throws -> AlbumContents {
         let account = credentials.account
-        let files = try await resolveFiles(fileIds: fileIds)
-        return files.map { GridItemSnapshot(file: $0, account: account) }
+        let entries: [NKFile] = try await nkResult {
+            NextcloudKit.shared.fetchAlbumPhotos(for: albumName, account: account, completion: $0)
+        }
+        // The album collection's own entry is a directory with no file id.
+        var entryNames: [String: String] = [:]
+        var fileIds: [String] = []
+        for entry in entries where !entry.directory && !entry.fileId.isEmpty {
+            guard entryNames[entry.fileId] == nil else { continue }
+            entryNames[entry.fileId] = entry.fileName
+            fileIds.append(entry.fileId)
+        }
+        guard !fileIds.isEmpty else { return AlbumContents(photos: [], entryNames: [:]) }
+
+        let photos = try await resolveFiles(fileIds: fileIds).map { GridItemSnapshot(file: $0, account: account) }
+        return AlbumContents(photos: photos, entryNames: entryNames)
     }
+
+    /// Creates a new, empty album.
+    func createAlbum(named name: String) async throws {
+        let account = credentials.account
+        _ = try await nkResult { NextcloudKit.shared.createNewAlbum(for: account, albumName: name, completion: $0) }
+    }
+
+    /// Renames an album. Fails (rather than overwriting) if `newName` is taken.
+    func renameAlbum(named name: String, to newName: String) async throws {
+        let account = credentials.account
+        _ = try await nkResult { NextcloudKit.shared.renameAlbum(account: account, from: name, to: newName, completion: $0) }
+    }
+
+    /// Deletes an album. Its photos are untouched — membership is only a reference.
+    func deleteAlbum(named name: String) async throws {
+        let account = credentials.account
+        _ = try await nkResult { NextcloudKit.shared.deleteAlbum(albumName: name, account: account, completion: $0) }
+    }
+
+    /// Adds the photo at `photoServerPath` (a full Files-DAV URL) to an album. The
+    /// Photos backend models membership as a COPY into the album collection — a
+    /// virtual reference, not a second copy of the bytes. A 409 means it's already
+    /// there, which is treated as success.
+    func addToAlbum(named albumName: String, photoServerPath: String, fileName: String) async throws {
+        let account = credentials.account
+        do {
+            _ = try await nkResult {
+                NextcloudKit.shared.copyPhotoToAlbum(
+                    account: account, sourcePath: photoServerPath, albumName: albumName, fileName: fileName, completion: $0
+                )
+            }
+        } catch GalleryError.network(code: 409, _) {
+            // Already in the album.
+        }
+    }
+
+    /// Removes one photo from an album (the real file is untouched). `entryName` is
+    /// the photo's name inside the album collection — see ``AlbumContents``.
+    func removeFromAlbum(named albumName: String, entryName: String) async throws {
+        do {
+            try await NextcloudKit.shared.deletePhotoFromAlbumAsync(albumName: albumName, fileName: entryName, account: credentials.account)
+        } catch let error as NKError {
+            throw GalleryError(error)
+        }
+    }
+
+    /// Bridges a NextcloudKit completion-handler call to async/await, translating
+    /// its `NKError` into a ``GalleryError``.
+    private func nkResult<T: Sendable>(_ call: (@escaping (Result<T, NKError>) -> Void) -> Void) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            call { continuation.resume(with: $0.mapError(GalleryError.init)) }
+        }
+    }
+
+    // MARK: - Resolving file ids
 
     /// Resolves opaque file ids to real `NKFile`s (path, ocId, etag, dimensions) via a
     /// files-tree WebDAV SEARCH, preserving the input order. Chunked so a huge album
@@ -174,38 +210,11 @@ extension NextcloudClient {
         return nil
     }
 
-    // MARK: - Writing
-
-    /// Creates a new, empty album.
-    func createAlbum(named name: String) async throws {
-        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
-        _ = try await davRequest(method: "MKCOL", urlString: photosAlbumsRoot + encoded)
-    }
-
-    /// Adds the photo at `photoServerPath` (a full Files-DAV URL) to `album`. The
-    /// Photos backend models album membership as a COPY into the album collection — a
-    /// virtual reference, not a second copy of the bytes (and the original is
-    /// untouched). A 409 means it's already there, which is treated as success.
-    func addToAlbum(_ album: Album, photoServerPath: String, fileName: String) async throws {
-        // `copyFileOrFolder` url-encodes both arguments, so build the destination from
-        // the *decoded* album name + file name (not the pre-encoded `album.davPath`).
-        let destination = photosAlbumsRoot + album.name + "/" + fileName
-        let result = await NextcloudKit.shared.copyFileOrFolderAsync(
-            serverUrlFileNameSource: photoServerPath,
-            serverUrlFileNameDestination: destination,
-            overwrite: false,
-            account: credentials.account
-        )
-        guard result.error == .success || result.error.errorCode == 409 else {
-            throw GalleryError(result.error)
-        }
-    }
-
     // MARK: - Raw WebDAV
 
-    /// Issues a basic-auth WebDAV request against the photos tree (NextcloudKit can't
-    /// reach it) and returns the response body. `depth`/`body` are optional so the same
-    /// helper serves PROPFIND (depth + body) and MKCOL (neither).
+    /// Issues a basic-auth WebDAV request (the system-tag `filter-files` REPORTs,
+    /// which NextcloudKit doesn't wrap) and returns the response body. `depth`/`body`
+    /// are optional.
     private func davRequest(method: String, urlString: String, depth: String? = nil, body: String? = nil) async throws -> Data {
         guard let url = URL(string: urlString) else { throw GalleryError.invalidServerURL }
         var request = URLRequest(url: url)
@@ -227,14 +236,6 @@ extension NextcloudClient {
         }
         return data
     }
-
-    /// The last (URL-decoded) path component of a WebDAV href, e.g. the album name
-    /// from `/remote.php/dav/photos/u/albums/My%20Album/`.
-    private static func lastPathComponent(ofHref href: String) -> String {
-        let trimmed = href.hasSuffix("/") ? String(href.dropLast()) : href
-        let last = trimmed.split(separator: "/").last.map(String.init) ?? ""
-        return last.removingPercentEncoding ?? last
-    }
 }
 
 // MARK: - WebDAV multistatus parsing
@@ -246,7 +247,7 @@ nonisolated struct WebDAVResponseEntry {
     let props: [String: String]
 }
 
-/// A minimal SAX parser for the simple album/photo PROPFINDs. Captures each
+/// A minimal SAX parser for the simple tag REPORTs. Captures each
 /// response's href plus the leaf text of every element inside its `<d:prop>` blocks.
 /// Not-found (`404`) props come back as empty elements, so empty values are dropped
 /// by callers; each requested prop appears in exactly one propstat, so status need

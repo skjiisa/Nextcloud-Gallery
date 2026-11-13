@@ -3,7 +3,8 @@
 //  Nextcloud Gallery
 //
 //  The "See All" destination for Home's Albums strip: every Nextcloud Photos album
-//  in a grid of cover tiles. Tapping one opens it via the ``GalleryNavigator``.
+//  in a grid of cover tiles. Tapping one opens it via the ``GalleryNavigator``;
+//  long-pressing offers Rename / Delete (``AlbumEditor``).
 //
 
 import UIKit
@@ -22,6 +23,7 @@ final class AllAlbumsViewController: UIViewController {
     private var isLoading = false
     private var errorMessage: String?
     private var didInitialLoad = false
+    private var albumObserver: NSObjectProtocol?
 
     private var thumbnailStore: ThumbnailStore { environment.thumbnailStore }
 
@@ -35,6 +37,10 @@ final class AllAlbumsViewController: UIViewController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    deinit {
+        if let albumObserver { NotificationCenter.default.removeObserver(albumObserver) }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -42,6 +48,9 @@ final class AllAlbumsViewController: UIViewController {
         setUpCollectionView()
         setUpStatusView()
         configureDataSource()
+        albumObserver = AlbumEditor.observe { [weak self] _ in
+            Task { await self?.load() }
+        }
         registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (self: Self, _) in
             self.collectionView.setCollectionViewLayout(self.makeLayout(), animated: false)
         }
@@ -143,5 +152,13 @@ extension AllAlbumsViewController: UICollectionViewDelegate {
         collectionView.deselectItem(at: indexPath, animated: true)
         guard let album = dataSource.itemIdentifier(for: indexPath) else { return }
         navigator?.openAlbum(album)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
+        guard let album = dataSource.itemIdentifier(for: indexPath) else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            guard let self else { return nil }
+            return UIMenu(children: AlbumEditor.menuElements(forAlbum: album.name, client: self.client, presenter: self))
+        }
     }
 }
