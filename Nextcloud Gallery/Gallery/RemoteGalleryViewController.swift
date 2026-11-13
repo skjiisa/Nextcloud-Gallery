@@ -4,13 +4,26 @@
 //
 //  A flat photo gallery backed by a one-shot async fetch rather than the SwiftData
 //  cache. Used for surfaces that aren't part of the warmed folder tree — the
-//  account's Favorites and the contents of a Photos album — both of which arrive as
-//  ready-to-render ``GridItemSnapshot`` values. Mirrors ``FlatGalleryViewController``
+//  account's Favorites, a Photos album, a tag — all of which arrive as
+//  ready-to-render ``GridItemSnapshot`` values. Album editing plugs in through
+//  ``RemoteGalleryActions``. Mirrors ``FlatGalleryViewController``
 //  (same cell, zoom/aspect from the ``BrowseTab``, viewer transition) minus the
 //  cache/search/sort machinery.
 //
 
 import UIKit
+
+/// Surface-specific extras a ``RemoteGalleryViewController`` can offer — e.g. an
+/// album's rename/delete and "Remove from Album". Owned (strongly) by the gallery.
+@MainActor
+protocol RemoteGalleryActions: AnyObject {
+    /// The gallery these actions act on; set by the gallery when attached.
+    var gallery: RemoteGalleryViewController? { get set }
+    /// A "more" menu for the navigation bar, or nil for none.
+    func barMenu() -> UIMenu?
+    /// Context-menu actions for a long-pressed photo (empty for no menu).
+    func contextMenuActions(for item: GridItemSnapshot) -> [UIMenuElement]
+}
 
 final class RemoteGalleryViewController: UIViewController {
     typealias Fetch = () async throws -> [GridItemSnapshot]
@@ -39,6 +52,11 @@ final class RemoteGalleryViewController: UIViewController {
     private var appliedAspectFill: Bool
 
     private var aspectItem: UIBarButtonItem!
+
+    /// Optional surface-specific actions (bar menu, per-photo context menu).
+    var actions: RemoteGalleryActions? {
+        didSet { actions?.gallery = self }
+    }
 
     /// Tight, Photos-style inter-tile gap and outer margin.
     private let tileSpacing: CGFloat = 2
@@ -168,7 +186,12 @@ final class RemoteGalleryViewController: UIViewController {
 
     private func setUpToolbar() {
         aspectItem = UIBarButtonItem(image: nil, style: .plain, target: self, action: #selector(toggleAspect))
-        navigationItem.rightBarButtonItem = aspectItem
+        if let menu = actions?.barMenu() {
+            let moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: menu)
+            navigationItem.rightBarButtonItems = [moreItem, aspectItem]
+        } else {
+            navigationItem.rightBarButtonItem = aspectItem
+        }
         updateToolbar()
     }
 
@@ -243,6 +266,23 @@ final class RemoteGalleryViewController: UIViewController {
         }
     }
 
+    // MARK: - External updates
+
+    /// Re-fetches the gallery's contents.
+    func reload() { Task { await load() } }
+
+    /// Drops one photo from the grid without a re-fetch (e.g. removed from an album).
+    func removeItem(ocId: String) {
+        items.removeAll { $0.ocId == ocId }
+        applySnapshot()
+        updateStatus()
+    }
+
+    /// Updates the navigation title (e.g. after an album rename).
+    func setGalleryTitle(_ title: String) {
+        navigationItem.title = title
+    }
+
     // MARK: - Actions
 
     @objc private func toggleAspect() { browseTab.aspectFill.toggle() }
@@ -261,6 +301,14 @@ extension RemoteGalleryViewController: UICollectionViewDelegate, UICollectionVie
         }
         let photos = items.filter { !$0.isDirectory }.map(PhotoItem.init(snapshot:))
         navigator?.openViewer(photos: photos, initialID: item.ocId, source: self)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
+        guard let item = dataSource.itemIdentifier(for: indexPath), !item.isDirectory,
+              let children = actions?.contextMenuActions(for: item), !children.isEmpty else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+            UIMenu(children: children)
+        }
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {

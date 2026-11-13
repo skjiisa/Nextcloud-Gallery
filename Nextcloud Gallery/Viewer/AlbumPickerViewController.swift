@@ -3,9 +3,8 @@
 //  Nextcloud Gallery
 //
 //  A sheet for adding one photo to a Nextcloud Photos album: pick an existing album
-//  or create a new one. Album membership is a COPY into the album collection — a
-//  virtual reference, so the original file is untouched (see ``NextcloudClient``
-//  albums extension).
+//  or create a new one. Album membership is a virtual reference, so the original
+//  file is untouched (see ``NextcloudClient`` albums extension).
 //
 
 import UIKit
@@ -120,12 +119,13 @@ final class AlbumPickerViewController: UITableViewController {
         busy = true
         Task {
             do {
-                try await client.addToAlbum(album, photoServerPath: photo.serverPath, fileName: photo.fileName)
+                try await client.addToAlbum(named: album.name, photoServerPath: photo.serverPath, fileName: photo.fileName)
+                AlbumEditor.post(.contentsChanged(album: album.name))
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 dismiss(animated: true)
             } catch {
                 busy = false
-                presentError(error)
+                AlbumEditor.presentError(error, title: "Couldn't Add to Album", from: self)
             }
         }
     }
@@ -139,9 +139,7 @@ final class AlbumPickerViewController: UITableViewController {
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Create", style: .default) { [weak self, weak alert] _ in
-            guard let self,
-                  let name = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !name.isEmpty else { return }
+            guard let self, let name = AlbumEditor.validatedName(alert?.textFields?.first?.text) else { return }
             self.createAndAdd(name: name)
         })
         present(alert, animated: true)
@@ -152,22 +150,15 @@ final class AlbumPickerViewController: UITableViewController {
         Task {
             do {
                 try await client.createAlbum(named: name)
-                // `addToAlbum` builds the destination from the album name; davPath isn't needed.
-                let album = Album(name: name, davPath: "", photoCount: 0, coverFileId: nil)
-                try await client.addToAlbum(album, photoServerPath: photo.serverPath, fileName: photo.fileName)
+                AlbumEditor.post(.contentsChanged(album: name))
+                try await client.addToAlbum(named: name, photoServerPath: photo.serverPath, fileName: photo.fileName)
+                AlbumEditor.post(.contentsChanged(album: name))
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 dismiss(animated: true)
             } catch {
                 busy = false
-                presentError(error)
+                AlbumEditor.presentError(error, title: "Couldn't Add to Album", from: self)
             }
         }
-    }
-
-    private func presentError(_ error: Error) {
-        let message = (error as? GalleryError)?.userMessage ?? error.localizedDescription
-        let alert = UIAlertController(title: "Couldn't Add to Album", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .cancel))
-        present(alert, animated: true)
     }
 }

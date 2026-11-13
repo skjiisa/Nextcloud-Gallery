@@ -23,7 +23,7 @@ nonisolated struct BrowseRoute: Hashable, Codable {
         case folder
         /// The account's Nextcloud favorites (a flat gallery).
         case favorites
-        /// A Nextcloud Photos album (a flat gallery), at `path` = its WebDAV collection.
+        /// A Nextcloud Photos album (a flat gallery), at `path` = the album's name.
         case album
         /// Files carrying a system tag (a flat gallery), at `path` = the tag id.
         case tag
@@ -34,8 +34,8 @@ nonisolated struct BrowseRoute: Hashable, Codable {
     }
 
     let kind: Kind
-    /// Folder path (`.folder`) or album WebDAV collection URL (`.album`); empty for
-    /// `.favorites`.
+    /// Folder path (`.folder`), album name (`.album`), or tag id (`.tag`); empty for
+    /// `.favorites` and the "See All" levels.
     let path: String
     let title: String
     let account: String
@@ -67,7 +67,12 @@ nonisolated struct BrowseRoute: Hashable, Codable {
 
     /// An album level.
     static func album(_ album: Album, account: String) -> BrowseRoute {
-        BrowseRoute(kind: .album, path: album.davPath, title: album.name, account: account, mode: .flat)
+        .album(named: album.name, account: account)
+    }
+
+    /// An album level, by album name.
+    static func album(named name: String, account: String) -> BrowseRoute {
+        BrowseRoute(kind: .album, path: name, title: name, account: account, mode: .flat)
     }
 
     /// A tag level (`path` = the tag id).

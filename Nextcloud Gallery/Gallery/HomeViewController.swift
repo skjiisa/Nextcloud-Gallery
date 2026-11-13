@@ -62,6 +62,7 @@ final class HomeViewController: UIViewController {
     private var mediaCoverTiles: [CoverTile] = []
     private var didInitialLoad = false
     private var mediaObserver: NSObjectProtocol?
+    private var albumObserver: NSObjectProtocol?
 
     /// How many items each strip previews ("See All" opens the rest).
     private let stripLimit = 12
@@ -81,6 +82,7 @@ final class HomeViewController: UIViewController {
 
     deinit {
         if let mediaObserver { NotificationCenter.default.removeObserver(mediaObserver) }
+        if let albumObserver { NotificationCenter.default.removeObserver(albumObserver) }
     }
 
     override func viewDidLoad() {
@@ -92,6 +94,11 @@ final class HomeViewController: UIViewController {
         configureDataSource()
         refreshButtons()
         applySnapshot()   // show the browser buttons immediately
+
+        // Any album edit (here or elsewhere) can change the strip's names/counts/covers.
+        albumObserver = AlbumEditor.observe { [weak self] _ in
+            Task { await self?.reloadAlbums() }
+        }
 
         // Rebuild the buttons when the media folder is set or cleared.
         mediaObserver = NotificationCenter.default.addObserver(
@@ -318,6 +325,12 @@ final class HomeViewController: UIViewController {
 
     @objc private func pullToRefresh() { Task { await load() } }
 
+    private func reloadAlbums() async {
+        guard let fresh = try? await client.listAlbums() else { return }
+        albums = fresh
+        applySnapshot()
+    }
+
     /// Up to 4 cover tiles for the current media folder (empty if none is set).
     private func fetchMediaCoverTiles() async -> [CoverTile] {
         guard let media = MediaFolder.path(account: account) else { return [] }
@@ -388,6 +401,14 @@ extension HomeViewController: UICollectionViewDelegate {
             navigator?.openAlbum(album)
         case .tag(let preview):
             navigator?.openTag(id: preview.tag.id, name: preview.tag.name)
+        }
+    }
+
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
+        guard case .album(let album) = dataSource.itemIdentifier(for: indexPath) else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            guard let self else { return nil }
+            return UIMenu(children: AlbumEditor.menuElements(forAlbum: album.name, client: self.client, presenter: self))
         }
     }
 }
